@@ -14,6 +14,7 @@ use crate::metadata::{snowflake, try_canonicalize_bool_column_field};
 use crate::record_batch_utils::get_column_values;
 use crate::relation::bigquery::BigqueryRelation;
 use crate::relation::databricks::DatabricksRelation;
+use crate::relation::duckdb::DuckdbRelation;
 use crate::relation::postgres::PostgresRelation;
 use crate::relation::redshift::RedshiftRelation;
 use crate::relation::salesforce::SalesforceRelation;
@@ -51,6 +52,37 @@ pub fn get_relation(
         AdapterType::Salesforce => {
             salesforce_get_relation(adapter, state, ctx, conn, database, schema, identifier)
         }
+        AdapterType::DuckDb => {
+            duckdb_get_relation(adapter, state, ctx, conn, database, schema, identifier)
+        }
+    }
+}
+
+fn duckdb_get_relation(
+    adapter: &dyn TypedBaseAdapter,
+    state: &State,
+    ctx: &QueryCtx,
+    conn: &'_ mut dyn Connection,
+    database: &str,
+    schema: &str,
+    identifier: &str,
+) -> AdapterResult<Option<Arc<dyn BaseRelation>>> {
+    // Re-use Postgres logic but create DuckdbRelation
+    let option = postgres_get_relation(adapter, state, ctx, conn, database, schema, identifier)?;
+    if let Some(relation) = option {
+        let postgres_relation = relation
+            .as_any()
+            .downcast_ref::<PostgresRelation>()
+            .expect("must be postgres relation");
+        Ok(Some(Arc::new(DuckdbRelation::try_new(
+            postgres_relation.path.database.clone(),
+            postgres_relation.path.schema.clone(),
+            postgres_relation.path.identifier.clone(),
+            postgres_relation.relation_type(),
+            adapter.quoting(),
+        )?)))
+    } else {
+        Ok(None)
     }
 }
 

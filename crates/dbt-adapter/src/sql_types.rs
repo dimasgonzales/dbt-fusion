@@ -104,7 +104,7 @@ impl TypeOps for NaiveTypeOpsImpl {
     ) -> AdapterResult<()> {
         let adapter_type = self.0;
         match adapter_type {
-            AdapterType::Postgres | AdapterType::Salesforce => {
+            AdapterType::Postgres | AdapterType::Salesforce | AdapterType::DuckDb => {
                 postgres::try_format_type(data_type, true, out)
             }
             _ => {
@@ -244,7 +244,7 @@ pub const fn get_field_sql_type_metadata_key(adapter_type: AdapterType) -> &'sta
         AdapterType::Redshift => REDSHIFT_METADATA_SQL_TYPE_KEY,
         AdapterType::Snowflake => SNOWFLAKE_METADATA_SQL_TYPE_KEY,
         AdapterType::Databricks => todo!(),
-        AdapterType::Postgres => todo!(),
+        AdapterType::Postgres | AdapterType::DuckDb => todo!(),
         AdapterType::Salesforce => todo!(),
     }
 }
@@ -291,7 +291,9 @@ impl SdfSchemaBuilder {
             Bigquery => metadata.get("Description"),
             Redshift | Databricks => metadata.get(ARROW_FIELD_COMMENT_METADATA_KEY),
             // no evidence that these drivers store comments in metadata, but just in case
-            Postgres | Snowflake | Salesforce => metadata.get(ARROW_FIELD_COMMENT_METADATA_KEY),
+            Postgres | Snowflake | Salesforce | DuckDb => {
+                metadata.get(ARROW_FIELD_COMMENT_METADATA_KEY)
+            }
         };
         comment
     }
@@ -339,7 +341,7 @@ impl SdfSchemaBuilder {
                     SdfSchema::from_sdf_arrow_schema(Some(self.original), sdf_arrow_schema);
                 Ok(sdf_schema)
             }
-            Postgres | Snowflake | Salesforce => {
+            Postgres | Snowflake | Salesforce | DuckDb => {
                 // NOTE(felipecrv): this is not correct, but it's a temporary fallback
                 // that allows us to call [to_sdf_arrow_schema] from anywhere.
                 //
@@ -599,7 +601,7 @@ pub const fn max_varchar_size(adapter_type: AdapterType) -> Option<usize> {
         // FIXME: Actual MAX is 134_217_728 - 16_777_216 is the default value
         Snowflake => Some(16_777_216),
         Redshift => Some(256),
-        Postgres | Bigquery | Databricks | Salesforce => None,
+        Postgres | Bigquery | Databricks | Salesforce | DuckDb => None,
     }
 }
 
@@ -609,7 +611,7 @@ pub const fn max_varbinary_size(adapter_type: AdapterType) -> Option<usize> {
         Snowflake => Some(16_777_216),
         Redshift => Some(65_535),
         // TODO: define limits for more systems
-        Postgres | Bigquery | Databricks | Salesforce => None,
+        Postgres | Bigquery | Databricks | Salesforce | DuckDb => None,
     }
 }
 
@@ -748,15 +750,18 @@ pub fn var_size(adapter_type: AdapterType, data_type: &DataType) -> Option<usize
         // For VARCHAR types, no explicit size in Snowflake unless specified
         (Snowflake, DataType::Utf8 | DataType::Utf8View) => None,
         // XXX: need to think about the defaults for these adapters
-        (Postgres | Bigquery | Databricks | Salesforce, DataType::Utf8 | DataType::Utf8View) => {
-            None
-        }
+        (
+            Postgres | Bigquery | Databricks | Salesforce | DuckDb,
+            DataType::Utf8 | DataType::Utf8View,
+        ) => None,
 
         // Bytes
         // TODO(jason): We need to report the correct size and not just a default
         (Redshift, DataType::Binary) => max_varbinary_size(Redshift),
         // XXX: need to think about the defaults for these adapters
-        (Snowflake | Postgres | Bigquery | Databricks | Salesforce, DataType::Binary) => None,
+        (Snowflake | Postgres | Bigquery | Databricks | Salesforce | DuckDb, DataType::Binary) => {
+            None
+        }
 
         // Snowflake: For timestamp/date/time types, extract precision if available
         (Snowflake, dt) if snowflake::is_time(dt).is_yes() => {
@@ -945,7 +950,8 @@ mod tests {
             "timestamp without time zone"
         );
     }
-    const ALL_ADAPTERS: [AdapterType; 5] = [Bigquery, Databricks, Postgres, Snowflake, Redshift];
+    const ALL_ADAPTERS: [AdapterType; 6] =
+        [Bigquery, Databricks, Postgres, Snowflake, Redshift, DuckDb];
 
     #[test]
     fn test_convert_date_type() {
@@ -973,5 +979,45 @@ mod tests {
         assert_eq!(convert_text_type(Postgres), "text");
         assert_eq!(convert_text_type(Snowflake), "text");
         assert_eq!(convert_text_type(Redshift), "text");
+        assert_eq!(convert_text_type(DuckDb), "text");
+    }
+
+    // ==================== DuckDB-Specific Tests ====================
+
+    #[test]
+    fn test_duckdb_max_varchar_size() {
+        // DuckDB has no VARCHAR size limit
+        assert_eq!(max_varchar_size(DuckDb), None);
+    }
+
+    #[test]
+    fn test_duckdb_max_varbinary_size() {
+        // DuckDB has no VARBINARY size limit
+        assert_eq!(max_varbinary_size(DuckDb), None);
+    }
+
+    #[test]
+    fn test_duckdb_type_hint_conversions() {
+        // DuckDB follows the default (non-Bigquery, non-Databricks) paths
+        assert_eq!(sql_type_hint_to_str(Integer, false, DuckDb), "integer");
+        assert_eq!(sql_type_hint_to_str(Floating, false, DuckDb), "integer");
+        assert_eq!(sql_type_hint_to_str(Decimal, false, DuckDb), "float8");
+        assert_eq!(sql_type_hint_to_str(Boolean, false, DuckDb), "boolean");
+        assert_eq!(
+            sql_type_hint_to_str(Datetime, false, DuckDb),
+            "timestamp without time zone"
+        );
+        assert_eq!(sql_type_hint_to_str(Date, false, DuckDb), "date");
+        assert_eq!(sql_type_hint_to_str(Time, false, DuckDb), "time");
+        assert_eq!(sql_type_hint_to_str(Text, false, DuckDb), "text");
+    }
+
+    #[test]
+    fn test_duckdb_var_size() {
+        use arrow_schema::DataType;
+        // DuckDB returns None for variable-length types (no size constraint)
+        assert_eq!(var_size(DuckDb, &DataType::Utf8), None);
+        assert_eq!(var_size(DuckDb, &DataType::Utf8View), None);
+        assert_eq!(var_size(DuckDb, &DataType::Binary), None);
     }
 }
