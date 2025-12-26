@@ -82,6 +82,12 @@ pub enum Commands {
     /// List selected nodes (alias for list)
     Ls(ListArgs),
 
+    /// Run the project
+    Run(RunArgs),
+
+    /// Build the project
+    Build(BuildArgs),
+
     /// Remove target directories
     Clean(CleanArgs),
 
@@ -166,6 +172,20 @@ pub struct ListArgs {
     /// Exclude nodes of a specific type;
     #[arg(long)]
     pub exclude_resource_type: Option<ClapResourceType>,
+}
+
+#[derive(Parser, Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RunArgs {
+    // Flattened Common args
+    #[clap(flatten)]
+    pub common_args: CommonArgs,
+}
+
+#[derive(Parser, Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BuildArgs {
+    // Flattened Common args
+    #[clap(flatten)]
+    pub common_args: CommonArgs,
 }
 
 #[derive(Parser, Debug, Default, Clone, Serialize, Deserialize)]
@@ -363,6 +383,8 @@ impl Cli {
             Commands::List(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
             Commands::Parse(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
             Commands::Ls(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
+            Commands::Run(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
+            Commands::Build(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
             Commands::Clean(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
             Commands::Man(args) => args.to_eval_args(system_arg, &in_dir, &out_dir),
         };
@@ -377,6 +399,8 @@ impl Cli {
             Commands::Deps(args) => args.common_args.clone(),
             Commands::List(args) => args.common_args.clone(),
             Commands::Ls(args) => args.common_args.clone(),
+            Commands::Run(args) => args.common_args.clone(),
+            Commands::Build(args) => args.common_args.clone(),
             Commands::Parse(args) => args.common_args.clone(),
             Commands::Clean(args) => args.common_args.clone(),
             Commands::Man(args) => args.common_args.clone(),
@@ -399,6 +423,8 @@ impl Cli {
             Commands::Parse(..) => FsCommand::Parse,
             Commands::List(..) => FsCommand::List,
             Commands::Ls(..) => FsCommand::List,
+            Commands::Run(..) => FsCommand::Run,
+            Commands::Build(..) => FsCommand::Build,
             Commands::Clean(..) => FsCommand::Clean,
             Commands::Man(..) => FsCommand::Man,
         }
@@ -454,6 +480,23 @@ impl ManArgs {
         eval_args.set_schema(self.schema.clone())
     }
 }
+
+impl RunArgs {
+    pub fn to_eval_args(&self, arg: SystemArgs, in_dir: &Path, out_dir: &Path) -> EvalArgs {
+        let mut eval_args = self.common_args.to_eval_args(arg, in_dir, out_dir);
+        eval_args.phase = Phases::All; // Run executes everything
+        eval_args
+    }
+}
+
+impl BuildArgs {
+    pub fn to_eval_args(&self, arg: SystemArgs, in_dir: &Path, out_dir: &Path) -> EvalArgs {
+        let mut eval_args = self.common_args.to_eval_args(arg, in_dir, out_dir);
+        eval_args.phase = Phases::All; // Build executes everything
+        eval_args
+    }
+}
+
 impl InitArgs {
     pub fn to_eval_args(&self, arg: SystemArgs, in_dir: &Path, out_dir: &Path) -> EvalArgs {
         let show = if arg.io.show.contains(&ShowOptions::All) {

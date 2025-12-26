@@ -21,6 +21,10 @@ dbt-parser = { workspace = true }
 
 dbt-schemas = { workspace = true }
 dbt-telemetry = { workspace = true }
+dbt-adapter = { workspace = true }
+dbt-dag = { workspace = true }
+dbt-xdbc = { workspace = true }
+dbt-auth = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
