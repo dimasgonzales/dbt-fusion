@@ -460,3 +460,44 @@ pub trait StaticBaseRelation: fmt::Debug + Send + Sync {
         Ok(Value::from(scd_args))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbt_schemas::schemas::relations::DEFAULT_RESOLVED_QUOTING;
+
+    #[test]
+    fn test_create_relation_duckdb() {
+        let relation = create_relation(
+            AdapterType::DuckDb,
+            "my_catalog".to_string(),
+            "my_schema".to_string(),
+            Some("my_table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .expect("should create DuckDB relation");
+
+        // Verify the relation has correct properties (observable behavior)
+        assert_eq!(relation.database().as_str(), Some("my_catalog"));
+        assert_eq!(relation.schema().as_str(), Some("my_schema"));
+        assert_eq!(relation.identifier().as_str(), Some("my_table"));
+        assert_eq!(relation.relation_type(), Some(RelationType::Table));
+        assert_eq!(relation.adapter_type(), Some("duckdb".to_string()));
+    }
+
+    #[test]
+    fn test_create_relation_duckdb_view() {
+        let relation = create_relation(
+            AdapterType::DuckDb,
+            "catalog".to_string(),
+            "schema".to_string(),
+            Some("my_view".to_string()),
+            Some(RelationType::View),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .expect("should create DuckDB view relation");
+
+        assert_eq!(relation.relation_type(), Some(RelationType::View));
+    }
+}

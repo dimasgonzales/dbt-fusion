@@ -104,7 +104,7 @@ impl TypeOps for NaiveTypeOpsImpl {
     ) -> AdapterResult<()> {
         let adapter_type = self.0;
         match adapter_type {
-            AdapterType::Postgres | AdapterType::Salesforce => {
+            AdapterType::Postgres | AdapterType::Salesforce | AdapterType::DuckDb => {
                 postgres::try_format_type(data_type, true, out)
             }
             _ => {
@@ -244,9 +244,8 @@ pub const fn get_field_sql_type_metadata_key(adapter_type: AdapterType) -> &'sta
         AdapterType::Redshift => REDSHIFT_METADATA_SQL_TYPE_KEY,
         AdapterType::Snowflake => SNOWFLAKE_METADATA_SQL_TYPE_KEY,
         AdapterType::Databricks => todo!(),
-        AdapterType::Postgres => todo!(),
+        AdapterType::Postgres | AdapterType::DuckDb => todo!(),
         AdapterType::Salesforce => todo!(),
-        AdapterType::DuckDb => todo!(),
     }
 }
 
@@ -980,5 +979,45 @@ mod tests {
         assert_eq!(convert_text_type(Postgres), "text");
         assert_eq!(convert_text_type(Snowflake), "text");
         assert_eq!(convert_text_type(Redshift), "text");
+        assert_eq!(convert_text_type(DuckDb), "text");
+    }
+
+    // ==================== DuckDB-Specific Tests ====================
+
+    #[test]
+    fn test_duckdb_max_varchar_size() {
+        // DuckDB has no VARCHAR size limit
+        assert_eq!(max_varchar_size(DuckDb), None);
+    }
+
+    #[test]
+    fn test_duckdb_max_varbinary_size() {
+        // DuckDB has no VARBINARY size limit
+        assert_eq!(max_varbinary_size(DuckDb), None);
+    }
+
+    #[test]
+    fn test_duckdb_type_hint_conversions() {
+        // DuckDB follows the default (non-Bigquery, non-Databricks) paths
+        assert_eq!(sql_type_hint_to_str(Integer, false, DuckDb), "integer");
+        assert_eq!(sql_type_hint_to_str(Floating, false, DuckDb), "integer");
+        assert_eq!(sql_type_hint_to_str(Decimal, false, DuckDb), "float8");
+        assert_eq!(sql_type_hint_to_str(Boolean, false, DuckDb), "boolean");
+        assert_eq!(
+            sql_type_hint_to_str(Datetime, false, DuckDb),
+            "timestamp without time zone"
+        );
+        assert_eq!(sql_type_hint_to_str(Date, false, DuckDb), "date");
+        assert_eq!(sql_type_hint_to_str(Time, false, DuckDb), "time");
+        assert_eq!(sql_type_hint_to_str(Text, false, DuckDb), "text");
+    }
+
+    #[test]
+    fn test_duckdb_var_size() {
+        use arrow_schema::DataType;
+        // DuckDB returns None for variable-length types (no size constraint)
+        assert_eq!(var_size(DuckDb, &DataType::Utf8), None);
+        assert_eq!(var_size(DuckDb, &DataType::Utf8View), None);
+        assert_eq!(var_size(DuckDb, &DataType::Binary), None);
     }
 }

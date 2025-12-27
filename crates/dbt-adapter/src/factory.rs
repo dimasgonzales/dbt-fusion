@@ -51,3 +51,27 @@ pub fn create_static_relation(
     };
     Some(Value::from_object(result))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbt_schemas::schemas::common::ResolvedQuoting;
+
+    #[test]
+    fn test_create_static_relation_duckdb() {
+        let quoting = ResolvedQuoting {
+            database: true,
+            schema: false,
+            identifier: true,
+        };
+        let value = create_static_relation(AdapterType::DuckDb, quoting);
+        assert!(value.is_some());
+        
+        // The value should be a StaticBaseRelationObject
+        let val = value.unwrap();
+        assert!(val.as_object().is_some());
+        
+        // We can't easily downcast minijinja::Value back to our struct here 
+        // without more boilerplate, but we've covered the creation path.
+    }
+}
