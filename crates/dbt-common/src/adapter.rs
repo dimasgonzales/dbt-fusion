@@ -23,6 +23,8 @@ pub enum AdapterType {
     Redshift,
     /// Salesforce
     Salesforce,
+    /// DuckDb
+    DuckDb,
 }
 
 impl From<AdapterType> for Dialect {
@@ -37,6 +39,7 @@ impl From<AdapterType> for Dialect {
             // https://developer.salesforce.com/docs/data/data-cloud-query-guide/references/data-cloud-query-api-reference/c360a-api-query-v2-call-overview.html
             // falls back to Postgresql at the moment
             AdapterType::Salesforce => Dialect::Postgresql,
+            AdapterType::DuckDb => Dialect::DuckDb,
         }
     }
 }
@@ -65,5 +68,53 @@ impl ExecutionPhase {
             ExecutionPhase::Analyze => DBT_EXECUTION_PHASE_ANALYZE,
             ExecutionPhase::Run => DBT_EXECUTION_PHASE_RUN,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_adapter_type_duckdb_to_string() {
+        assert_eq!(AdapterType::DuckDb.to_string(), "duckdb");
+    }
+
+    #[test]
+    fn test_adapter_type_duckdb_from_string() {
+        assert_eq!(
+            AdapterType::from_str("duckdb").unwrap(),
+            AdapterType::DuckDb
+        );
+        assert_eq!(
+            AdapterType::from_str("DuckDb").unwrap(),
+            AdapterType::DuckDb
+        );
+        assert_eq!(
+            AdapterType::from_str("DUCKDB").unwrap(),
+            AdapterType::DuckDb
+        );
+    }
+
+    #[test]
+    fn test_adapter_type_duckdb_to_dialect() {
+        let dialect: Dialect = AdapterType::DuckDb.into();
+        assert_eq!(dialect, Dialect::DuckDb);
+    }
+
+    #[test]
+    fn test_adapter_type_duckdb_as_ref() {
+        assert_eq!(AdapterType::DuckDb.as_ref(), "duckdb");
+    }
+
+    #[test]
+    fn test_adapter_type_duckdb_serde() {
+        let adapter = AdapterType::DuckDb;
+        let serialized = serde_json::to_string(&adapter).unwrap();
+        assert_eq!(serialized, "\"duckdb\"");
+
+        let deserialized: AdapterType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, AdapterType::DuckDb);
     }
 }
