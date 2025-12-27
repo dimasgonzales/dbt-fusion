@@ -41,6 +41,7 @@ pub enum Dialect {
     SparkLp,
     Redshift,
     Databricks,
+    DuckDb,
 }
 
 impl Display for Dialect {
@@ -56,6 +57,7 @@ impl Display for Dialect {
             Dialect::SparkLp => write!(f, "spark-lp"),
             Dialect::Redshift => write!(f, "redshift"),
             Dialect::Databricks => write!(f, "databricks"),
+            Dialect::DuckDb => write!(f, "duckdb"),
         }
     }
 }
@@ -77,6 +79,7 @@ impl FromStr for Dialect {
             "spark-lp" => Ok(Dialect::SparkLp),
             "redshift" => Ok(Dialect::Redshift),
             "databricks" => Ok(Dialect::Databricks),
+            "duckdb" => Ok(Dialect::DuckDb),
 
             // "passthrough" adapter type is used to disable most local semantic
             // analysis, so we just map it to the default dialect.
@@ -455,5 +458,54 @@ fn parse_dot(sql: &str) -> InternalResult<&str> {
         }
     } else {
         internal_err!("expecting '.' but got {c}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dialect_duckdb_to_string() {
+        assert_eq!(Dialect::DuckDb.to_string(), "duckdb");
+    }
+
+    #[test]
+    fn test_dialect_duckdb_from_str() {
+        assert_eq!(Dialect::from_str("duckdb").unwrap(), Dialect::DuckDb);
+    }
+
+    #[test]
+    fn test_dialect_duckdb_quote_char() {
+        assert_eq!(Dialect::DuckDb.quote_char(), '"');
+    }
+
+    #[test]
+    fn test_dialect_duckdb_escape_char() {
+        assert_eq!(Dialect::DuckDb.escape_char(), '"');
+    }
+
+    #[test]
+    fn test_dialect_duckdb_is_valid_identifier_char() {
+        let dialect = Dialect::DuckDb;
+        assert!(dialect.is_valid_identifier_char('a'));
+        assert!(dialect.is_valid_identifier_char('Z'));
+        assert!(dialect.is_valid_identifier_char('_'));
+        assert!(dialect.is_valid_identifier_char('0'));
+        assert!(!dialect.is_valid_identifier_char('.'));
+    }
+
+    #[test]
+    fn test_dialect_duckdb_parse_identifier() {
+        let dialect = Dialect::DuckDb;
+        let id = dialect.parse_identifier("my_table").unwrap();
+        assert_eq!(id.to_value(), "my_table");
+    }
+
+    #[test]
+    fn test_dialect_duckdb_parse_quoted_identifier() {
+        let dialect = Dialect::DuckDb;
+        let id = dialect.parse_identifier("\"My Table\"").unwrap();
+        assert_eq!(id.to_value(), "My Table");
     }
 }
