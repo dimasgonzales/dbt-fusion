@@ -14,6 +14,7 @@ use crate::metadata::{snowflake, try_canonicalize_bool_column_field};
 use crate::record_batch_utils::get_column_values;
 use crate::relation::bigquery::BigqueryRelation;
 use crate::relation::databricks::DatabricksRelation;
+use crate::relation::duckdb::DuckdbRelation;
 use crate::relation::postgres::PostgresRelation;
 use crate::relation::redshift::RedshiftRelation;
 use crate::relation::salesforce::SalesforceRelation;
@@ -52,10 +53,106 @@ pub fn get_relation(
             salesforce_get_relation(adapter, state, ctx, conn, database, schema, identifier)
         }
         AdapterType::DuckDb => {
-            // DuckDB is PostgreSQL-compatible, so we use postgres_get_relation
-            postgres_get_relation(adapter, state, ctx, conn, database, schema, identifier)
+            duckdb_get_relation(adapter, state, ctx, conn, database, schema, identifier)
         }
     }
+}
+
+fn duckdb_get_relation(
+    adapter: &dyn TypedBaseAdapter,
+    state: &State,
+    ctx: &QueryCtx,
+    conn: &'_ mut dyn Connection,
+    _database: &str,
+    schema: &str,
+    identifier: &str,
+) -> AdapterResult<Option<Arc<dyn BaseRelation>>> {
+    // Helper to escape single quotes for SQL string literals
+    let esc = |s: &str| s.replace('\'', "''");
+
+    // Step 1: Check if table/view exists in information_schema
+    let query_schema = if adapter.quoting().schema {
+        schema.to_string()
+    } else {
+        schema.to_lowercase()
+    };
+    let query_identifier = if adapter.quoting().identifier {
+        identifier.to_string()
+    } else {
+        identifier.to_lowercase()
+    };
+
+    let check_sql = format!(
+        "SELECT table_type FROM information_schema.tables \
+         WHERE lower(table_schema) = lower('{}') AND lower(table_name) = lower('{}') LIMIT 1",
+        esc(&query_schema),
+        esc(&query_identifier)
+    );
+
+    let batch = adapter
+        .engine()
+        .execute(Some(state), conn, ctx, &check_sql)?;
+    if batch.num_rows() == 0 {
+        return Ok(None);
+    }
+
+    // Extract relation type from table_type column
+    let relation_type = if let Some(col) = batch.column_by_name("table_type") {
+        if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+            if !arr.is_null(0) {
+                match arr.value(0).to_uppercase().as_str() {
+                    "BASE TABLE" => Some(RelationType::Table),
+                    "VIEW" => Some(RelationType::View),
+                    "LOCAL TEMPORARY" => Some(RelationType::Table),
+                    _ => Some(RelationType::Table),
+                }
+            } else {
+                Some(RelationType::Table)
+            }
+        } else {
+            Some(RelationType::Table)
+        }
+    } else {
+        Some(RelationType::Table)
+    };
+
+    // Step 2: Detect catalog from information_schema.schemata
+    // In DuckDB, in-memory databases use "memory" as catalog, file-backed use their name
+    let detect_catalog_sql = format!(
+        "SELECT catalog_name FROM information_schema.schemata \
+         WHERE lower(schema_name) = lower('{}') LIMIT 1",
+        esc(&query_schema)
+    );
+
+    let catalog_batch = adapter
+        .engine()
+        .execute(Some(state), conn, ctx, &detect_catalog_sql)?;
+    let catalog = if catalog_batch.num_rows() > 0 {
+        if let Some(col) = catalog_batch.column_by_name("catalog_name") {
+            if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                if !arr.is_null(0) {
+                    Some(arr.value(0).to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Step 3: Create DuckdbRelation with detected catalog
+    Ok(Some(Arc::new(DuckdbRelation::try_new(
+        catalog,
+        Some(schema.to_string()),
+        Some(identifier.to_string()),
+        relation_type,
+        adapter.quoting(),
+    )?)))
 }
 
 // https://github.com/dbt-labs/dbt-adapters/blob/ace1709df001df4232a66f9d5f331a5fda4d3389/dbt-snowflake/src/dbt/include/snowflake/macros/adapters.sql#L138
