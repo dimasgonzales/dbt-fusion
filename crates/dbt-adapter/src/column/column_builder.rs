@@ -26,7 +26,7 @@ impl ColumnBuilder {
             Bigquery => Ok(Self::build_bigquery(field, type_ops)),
             Databricks => Ok(Self::build_databricks(field, type_ops)),
             Redshift => Ok(Self::build_redshift(field, type_ops)),
-            Postgres | Salesforce => Ok(Self::build_postgres_like(field, type_ops)),
+            Postgres | Salesforce | DuckDb => Ok(Self::build_postgres_like(field, type_ops)),
         }
     }
 
@@ -72,6 +72,14 @@ impl ColumnBuilder {
                 None, // numeric_scale
             ),
             Salesforce => todo!("Salesforce column creation not implemented yet"),
+            DuckDb => Column::new(
+                DuckDb,
+                name,
+                dtype,
+                char_size,
+                numeric_precision,
+                numeric_scale,
+            ),
         }
     }
 

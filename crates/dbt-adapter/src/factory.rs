@@ -43,6 +43,11 @@ pub fn create_static_relation(
             let salesforce_relation_type = SalesforceRelationType(quoting);
             StaticBaseRelationObject::new(Arc::new(salesforce_relation_type))
         }
+        AdapterType::DuckDb => {
+            // DuckDB is PostgreSQL-compatible, so we use PostgressRelationType
+            let postgres_relation_type = PostgresRelationType(quoting);
+            StaticBaseRelationObject::new(Arc::new(postgres_relation_type))
+        }
     };
     Some(Value::from_object(result))
 }

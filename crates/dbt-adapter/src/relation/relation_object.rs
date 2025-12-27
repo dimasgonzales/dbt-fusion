@@ -243,6 +243,16 @@ pub fn create_relation(
             identifier,
             relation_type,
         )) as Arc<dyn BaseRelation>,
+        AdapterType::DuckDb => {
+            // DuckDB is PostgreSQL-compatible, so we use PostgresRelation
+            Arc::new(PostgresRelation::try_new(
+                Some(database),
+                Some(schema),
+                identifier,
+                relation_type,
+                custom_quoting,
+            )?) as Arc<dyn BaseRelation>
+        }
     };
     Ok(relation)
 }
