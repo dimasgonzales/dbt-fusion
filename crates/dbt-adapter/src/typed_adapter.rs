@@ -140,6 +140,10 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Bigquery => &BIGQUERY,
             AdapterType::Databricks => &DATABRICKS,
             AdapterType::Redshift => &REDSHIFT,
+            AdapterType::DuckDb => {
+                static DUCKDB: [DbtIncrementalStrategy; 3] = [Append, DeleteInsert, Merge];
+                &DUCKDB
+            }
             AdapterType::Salesforce => {
                 unimplemented!("Salesforce valid_incremental_strategies not implemented")
             }
@@ -500,8 +504,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Snowflake
             | AdapterType::Redshift
             | AdapterType::Postgres
-            | AdapterType::Salesforce
-            | AdapterType::DuckDb => format!("\"{identifier}\""),
+            | AdapterType::DuckDb
+            | AdapterType::Salesforce => format!("\"{identifier}\""),
             AdapterType::Bigquery | AdapterType::Databricks => format!("`{identifier}`"),
         }
     }
@@ -513,7 +517,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
                 AdapterType::Snowflake => "name",
                 AdapterType::Databricks => "databaseName",
                 AdapterType::Bigquery => "schema_name",
-                AdapterType::Postgres | AdapterType::Redshift | AdapterType::DuckDb => "nspname",
+                AdapterType::Postgres | AdapterType::Redshift => "nspname",
+                AdapterType::DuckDb => "schema_name",
                 AdapterType::Salesforce => "name",
             };
             get_column_values::<StringArray>(&result_set, col_name)?
@@ -808,7 +813,7 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
         };
 
         match self.adapter_type() {
-            AdapterType::Postgres | AdapterType::Redshift => {
+            AdapterType::Postgres | AdapterType::Redshift | AdapterType::DuckDb => {
                 let result = macro_execution_result?;
                 Ok(Column::vec_from_jinja_value(self.adapter_type(), result)?)
             }
@@ -1414,6 +1419,7 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
 
                 Ok(result)
             }
+            AdapterType::DuckDb => Ok(BTreeMap::new()),
             AdapterType::Salesforce => unimplemented!("Salesforce grants not implemented"),
         }
     }
@@ -2564,11 +2570,7 @@ impl AdapterTyping for ConcreteAdapter {
             AdapterType::Salesforce => {
                 Box::new(SalesforceMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
             }
-            AdapterType::Postgres => {
-                Box::new(PostgresMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
-            }
-            AdapterType::DuckDb => {
-                // DuckDB uses Postgres metadata adapter since it's PostgreSQL-compatible
+            AdapterType::Postgres | AdapterType::DuckDb => {
                 Box::new(PostgresMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
             }
         };
