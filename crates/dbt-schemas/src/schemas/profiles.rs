@@ -47,6 +47,7 @@ pub enum DbConfig {
     // Spark,
     Databricks(Box<DatabricksDbConfig>),
     Salesforce(Box<SalesforceDbConfig>),
+    DuckDb(Box<DuckdbDbConfig>),
     // Hive,
     // Exasol,
     // Oracle,
@@ -100,6 +101,7 @@ impl_from_db_config!(Bigquery, BigqueryDbConfig);
 impl_from_db_config!(Trino, TrinoDbConfig);
 impl_from_db_config!(Datafusion, DatafusionDbConfig);
 impl_from_db_config!(Databricks, DatabricksDbConfig);
+impl_from_db_config!(DuckDb, DuckdbDbConfig);
 
 impl DbConfig {
     pub fn get_unique_field(&self) -> Option<&String> {
@@ -112,6 +114,7 @@ impl DbConfig {
             DbConfig::Redshift(config) => config.host.as_ref(),
             DbConfig::Databricks(config) => config.host.as_ref(),
             DbConfig::Salesforce(config) => config.client_id.as_ref(),
+            DbConfig::DuckDb(config) => config.path.as_ref(),
         }
     }
 
@@ -215,16 +218,16 @@ impl DbConfig {
             DbConfig::Databricks(_) => &["host", "http_path", "schema"],
             // TODO: Salesforce connection keys
             DbConfig::Salesforce(_) => &["login_url", "database", "data_transform_run_timeout"],
-            // TODO: Trino and Datafusion connection keys
             DbConfig::Trino(_) => &[],
             DbConfig::Datafusion(_) => &[],
+            DbConfig::DuckDb(_) => &["path", "extensions", "settings", "schema", "threads"],
         }
     }
 
     pub fn get_execute_mode(&self) -> Execute {
         match self {
             DbConfig::Snowflake(config) => config.execute,
-            DbConfig::Datafusion(_) => Execute::Local,
+            DbConfig::Datafusion(_) | DbConfig::DuckDb(_) => Execute::Local,
             _ => Execute::Remote,
         }
     }
@@ -250,6 +253,7 @@ impl DbConfig {
             DbConfig::Redshift(config) => dbt_serde_yaml::to_value(config),
             DbConfig::Databricks(config) => dbt_serde_yaml::to_value(config),
             DbConfig::Salesforce(config) => dbt_serde_yaml::to_value(config),
+            DbConfig::DuckDb(config) => dbt_serde_yaml::to_value(config),
         }
     }
 
@@ -264,6 +268,7 @@ impl DbConfig {
             DbConfig::Datafusion(..) => "datafusion",
             DbConfig::Databricks(..) => "databricks",
             DbConfig::Salesforce(..) => "salesforce",
+            DbConfig::DuckDb(..) => "duckdb",
         }
     }
 
@@ -277,6 +282,7 @@ impl DbConfig {
             DbConfig::Datafusion(..) => None,
             DbConfig::Databricks(..) => Some(AdapterType::Databricks),
             DbConfig::Salesforce(..) => Some(AdapterType::Salesforce),
+            DbConfig::DuckDb(..) => Some(AdapterType::DuckDb),
         }
     }
 
@@ -290,9 +296,30 @@ impl DbConfig {
             DbConfig::Datafusion(config) => config.database.as_ref(),
             DbConfig::Databricks(config) => config.database.as_ref(),
             DbConfig::Salesforce(config) => config.database.as_ref(),
+            DbConfig::DuckDb(_config) => None,
         }
     }
 
+    /// Returns the database name as an owned String.
+    /// For DuckDB, this derives the database name from the path:
+    /// - `:memory:` -> "memory"
+    /// - `./path/to/file.duckdb` -> "file" (the file stem)
+    pub fn get_database_string(&self) -> Option<String> {
+        match self {
+            DbConfig::DuckDb(config) => config.path.as_ref().map(|path| {
+                if path == ":memory:" {
+                    "memory".to_string()
+                } else {
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("main")
+                        .to_string()
+                }
+            }),
+            _ => self.get_database().cloned(),
+        }
+    }
     pub fn get_schema(&self) -> Option<&String> {
         match self {
             DbConfig::Redshift(config) => config.schema.as_ref(),
@@ -303,6 +330,7 @@ impl DbConfig {
             DbConfig::Datafusion(config) => config.schema.as_ref(),
             DbConfig::Databricks(config) => config.schema.as_ref(),
             DbConfig::Salesforce(_) => None,
+            DbConfig::DuckDb(config) => config.schema.as_ref(),
         }
     }
 
@@ -316,6 +344,7 @@ impl DbConfig {
             DbConfig::Trino(config) => config.threads.as_ref(),
             DbConfig::Datafusion(_) => None,
             DbConfig::Salesforce(_) => None,
+            DbConfig::DuckDb(config) => config.threads.as_ref(),
         }
     }
 
@@ -329,6 +358,7 @@ impl DbConfig {
             DbConfig::Redshift(config) => config.threads = threads,
             DbConfig::Datafusion(_) => (),
             DbConfig::Salesforce(_) => (),
+            DbConfig::DuckDb(config) => config.threads = threads,
         }
     }
 
@@ -771,6 +801,20 @@ fn default_data_transform_run_timeout() -> Option<i64> {
     Some(180000) // 3 mins
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, JsonSchema, Merge)]
+#[merge(strategy = merge_strategies_extend::overwrite_option)]
+#[serde(rename_all = "snake_case")]
+pub struct DuckdbDbConfig {
+    pub path: Option<String>,
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<StringOrInteger>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<HashMap<String, String>>,
+}
+
 #[derive(Serialize, JsonSchema)]
 #[serde(untagged)]
 #[serde(rename_all = "snake_case")]
@@ -784,6 +828,7 @@ pub enum TargetContext {
     Databricks(DatabricksTargetEnv),
     Redshift(RedshiftTargetEnv),
     Salesforce(SalesforceTargetEnv),
+    DuckDb(DuckdbTargetEnv),
     // Add other variants as needed
 }
 
@@ -924,6 +969,12 @@ pub struct RedshiftTargetEnv {
 
 #[derive(Serialize, JsonSchema)]
 pub struct SalesforceTargetEnv {
+    pub __common__: CommonTargetContext,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct DuckdbTargetEnv {
+    pub path: String,
     pub __common__: CommonTargetContext,
 }
 
@@ -1140,6 +1191,38 @@ impl TryFrom<DbConfig> for TargetContext {
                     threads: None,
                 },
             })),
+            DbConfig::DuckDb(config) => {
+                let path = config.path.clone().ok_or_else(|| missing("path"))?;
+                // For DuckDB, the database name should be derived properly:
+                // - For :memory: use "memory"
+                // - For file paths, use the filename without extension
+                let database = if path == ":memory:" {
+                    "memory".to_string()
+                } else {
+                    std::path::Path::new(&path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("main")
+                        .to_string()
+                };
+                Ok(TargetContext::DuckDb(DuckdbTargetEnv {
+                    path,
+                    __common__: CommonTargetContext {
+                        database,
+                        schema: config.schema.clone().unwrap_or("main".to_string()),
+                        type_: adapter_type,
+                        threads: match config.threads {
+                            Some(StringOrInteger::String(threads)) => {
+                                Some(threads.parse::<u16>().map_err(|_| {
+                                    "threads must be a positive integer".to_string()
+                                })?)
+                            }
+                            Some(StringOrInteger::Integer(threads)) => Some(threads as u16),
+                            None => None,
+                        },
+                    },
+                }))
+            }
         }
     }
 }
@@ -1194,5 +1277,129 @@ mod tests {
         } else {
             panic!("Expected DbConfig::Bigquery, got {config:?}",);
         }
+    }
+
+    // ==================== DuckDB Tests ====================
+
+    #[test]
+    fn test_duckdb_profile_deserialization() {
+        let yaml = r#"
+            type: duckdb
+            path: ./my_database.duckdb
+            schema: main
+            threads: 4
+        "#;
+        let config: DbConfig = dbt_serde_yaml::from_str(yaml).unwrap();
+        match config {
+            DbConfig::DuckDb(duck) => {
+                assert_eq!(duck.path.as_ref().unwrap(), "./my_database.duckdb");
+                assert_eq!(duck.schema.as_ref().unwrap(), "main");
+                assert!(matches!(duck.threads, Some(StringOrInteger::Integer(4))));
+            }
+            _ => panic!("Expected DuckDb config, got {config:?}"),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_profile_with_extensions() {
+        let yaml = r#"
+            type: duckdb
+            path: ./data.duckdb
+            schema: analytics
+            extensions:
+              - parquet
+              - httpfs
+              - json
+        "#;
+        let config: DbConfig = dbt_serde_yaml::from_str(yaml).unwrap();
+        match config {
+            DbConfig::DuckDb(duck) => {
+                let extensions = duck.extensions.as_ref().unwrap();
+                assert_eq!(extensions.len(), 3);
+                assert!(extensions.contains(&"parquet".to_string()));
+                assert!(extensions.contains(&"httpfs".to_string()));
+                assert!(extensions.contains(&"json".to_string()));
+            }
+            _ => panic!("Expected DuckDb config, got {config:?}"),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_profile_with_settings() {
+        let yaml = r#"
+            type: duckdb
+            path: ./data.duckdb
+            schema: main
+            settings:
+              memory_limit: "4GB"
+              threads: "2"
+        "#;
+        let config: DbConfig = dbt_serde_yaml::from_str(yaml).unwrap();
+        match config {
+            DbConfig::DuckDb(duck) => {
+                let settings = duck.settings.as_ref().unwrap();
+                assert_eq!(settings.get("memory_limit").unwrap(), "4GB");
+                assert_eq!(settings.get("threads").unwrap(), "2");
+            }
+            _ => panic!("Expected DuckDb config, got {config:?}"),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_memory_config() {
+        let yaml = r#"
+            type: duckdb
+            path: ":memory:"
+            schema: main
+        "#;
+        let config: DbConfig = dbt_serde_yaml::from_str(yaml).unwrap();
+        match config {
+            DbConfig::DuckDb(duck) => {
+                assert_eq!(duck.path.as_ref().unwrap(), ":memory:");
+            }
+            _ => panic!("Expected DuckDb config, got {config:?}"),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_target_context_conversion() {
+        let duck_config = DuckdbDbConfig {
+            path: Some("./test.duckdb".to_string()),
+            schema: Some("analytics".to_string()),
+            threads: Some(StringOrInteger::Integer(8)),
+            extensions: None,
+            settings: None,
+        };
+        let db_config: DbConfig = duck_config.into();
+        let target_context: TargetContext = db_config.try_into().unwrap();
+
+        match target_context {
+            TargetContext::DuckDb(env) => {
+                assert_eq!(env.path, "./test.duckdb");
+                assert_eq!(env.__common__.database, "test");
+                assert_eq!(env.__common__.schema, "analytics");
+                assert_eq!(env.__common__.type_, "duckdb");
+                assert_eq!(env.__common__.threads, Some(8));
+            }
+            _ => panic!("Expected DuckDb target context"),
+        }
+    }
+
+    #[test]
+    fn test_duckdb_adapter_type() {
+        let config: DbConfig = DuckdbDbConfig {
+            path: Some("./test.duckdb".to_string()),
+            schema: None,
+            threads: None,
+            extensions: None,
+            settings: None,
+        }
+        .into();
+
+        assert_eq!(config.adapter_type(), "duckdb");
+        assert_eq!(
+            config.adapter_type_if_supported(),
+            Some(AdapterType::DuckDb)
+        );
     }
 }
