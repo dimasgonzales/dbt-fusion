@@ -201,16 +201,17 @@ impl TrieNode {
 
 /// Example:
 ///
-///     columns: {
-///         "a": {"name": "a", "data_type": "string", "description": ...},
-///         "b.nested": {"name": "b.nested", "data_type": "string"},
-///         "b.nested2": {"name": "b.nested2", "data_type": "string"}
-///     }
-///     returns: {
-///         "a": {"name": "a", "data_type": "string"},
-///         "b": {"name": "b": "data_type": "struct<nested string, nested2 string>}
-///     }
-///
+/// ```text
+/// columns: {
+///     "a": {"name": "a", "data_type": "string", "description": ...},
+///     "b.nested": {"name": "b.nested", "data_type": "string"},
+///     "b.nested2": {"name": "b.nested2", "data_type": "string"}
+/// }
+/// returns: {
+///     "a": {"name": "a", "data_type": "string"},
+///     "b": {"name": "b", "data_type": "struct<nested string, nested2 string>"}
+/// }
+/// ```
 /// arbitrarily nested struct/array types are allowed, for more details check out the
 /// tests/data/nest_column_data_types example
 /// reference: https://github.com/dbt-labs/dbt-core/blob/main/env/lib/python3.12/site-packages/dbt/adapters/bigquery/column.py#L131-L132
