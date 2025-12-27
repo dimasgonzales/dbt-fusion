@@ -42,7 +42,18 @@ use std::sync::Arc;
 use dbt_loader::{args::LoadArgs, load};
 use dbt_parser::{args::ResolveArgs, resolver::resolve};
 
+use dbt_adapter::adapter_engine::AdapterEngine;
+use dbt_adapter::query_comment::QueryCommentConfig;
+use dbt_adapter::sql_types::NaiveTypeOpsImpl;
+use dbt_adapter::stmt_splitter::NaiveStmtSplitter;
+use dbt_auth::{AdapterConfig, auth_for_backend};
+use dbt_common::io_args::FsCommand;
+use dbt_dag::deps_mgmt::{ensure_all_nodes_defined, topological_sort};
+use dbt_schemas::schemas::common::DbtMaterialization;
+use dbt_schemas::schemas::common::ResolvedQuoting;
+use dbt_xdbc::{Backend, QueryCtx};
 use serde_json::to_string_pretty;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ------------------------------------------------------------------------------------------------
 
@@ -217,6 +228,7 @@ async fn execute_all_phases(
     let load_args = LoadArgs::from_eval_args(arg);
     let invocation_args = InvocationArgs::from_eval_args(arg);
     let (dbt_state, _dbt_cloud_config) = load(&load_args, &invocation_args, token).await?;
+    let dbt_state = Arc::new(dbt_state);
 
     let arg = EvalArgsBuilder::from_eval_args(arg)
         .with_additional(
@@ -247,7 +259,7 @@ async fn execute_all_phases(
     let (resolved_state, _jinja_env) = resolve(
         &resolve_args,
         &invocation_args,
-        Arc::new(dbt_state),
+        dbt_state.clone(),
         Macros::default(),
         Nodes::default(),
         GetRelationCalls::default(),
@@ -271,6 +283,164 @@ async fn execute_all_phases(
             ShowResult::new_text(to_string_pretty(&dbt_manifest)?, "manifest", "Manifest"),
             None,
         );
+    }
+
+    if matches!(arg.command, FsCommand::Run | FsCommand::Build) {
+        emit_info_progress_message(
+            ProgressMessage::new_from_action_and_target(
+                "Running".to_string(),
+                "dbt project".to_string(),
+            ),
+            arg.io.status_reporter.as_ref(),
+        );
+
+        let adapter_type = dbt_state
+            .dbt_profile
+            .db_config
+            .adapter_type_if_supported()
+            .ok_or_else(|| fs_err!(ErrorCode::Generic, "Unsupported adapter type"))?;
+
+        let backend = match dbt_state.dbt_profile.db_config.adapter_type() {
+            "duckdb" => Backend::DuckDB,
+            _ => {
+                return Err(fs_err!(
+                    ErrorCode::Generic,
+                    "Only DuckDB supported currently use_warehouse logic not used"
+                ));
+            }
+        };
+
+        let auth = auth_for_backend(backend);
+        let config_mapping = dbt_state
+            .dbt_profile
+            .db_config
+            .to_mapping()
+            .map_err(|e| fs_err!(ErrorCode::Generic, "Config error: {}", e))?;
+        let config = AdapterConfig::new(config_mapping);
+
+        let engine = AdapterEngine::new(
+            adapter_type,
+            Arc::from(auth),
+            config,
+            ResolvedQuoting::default(),  // TODO: use actual quoting
+            Arc::new(NaiveStmtSplitter), // TODO: use actual splitter
+            None,
+            QueryCommentConfig::from_query_comment(None, adapter_type, false),
+            Box::new(NaiveTypeOpsImpl::new(adapter_type)),
+            token.clone(),
+        );
+
+        // Build dependency graph
+        let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+        // Models
+        for (unique_id, node) in &resolved_state.nodes.models {
+            use dbt_schemas::schemas::InternalDbtNode;
+            let mut node_deps = BTreeSet::new();
+            for (dep, _) in &node.base().depends_on.nodes_with_ref_location {
+                node_deps.insert(dep.clone());
+            }
+            deps.insert(unique_id.clone(), node_deps);
+        }
+        // Seeds
+        for (unique_id, node) in &resolved_state.nodes.seeds {
+            use dbt_schemas::schemas::InternalDbtNode;
+            let mut node_deps = BTreeSet::new();
+            for (dep, _) in &node.base().depends_on.nodes_with_ref_location {
+                node_deps.insert(dep.clone());
+            }
+            deps.insert(unique_id.clone(), node_deps);
+        }
+        // Snapshots
+        for (unique_id, node) in &resolved_state.nodes.snapshots {
+            use dbt_schemas::schemas::InternalDbtNode;
+            let mut node_deps = BTreeSet::new();
+            for (dep, _) in &node.base().depends_on.nodes_with_ref_location {
+                node_deps.insert(dep.clone());
+            }
+            deps.insert(unique_id.clone(), node_deps);
+        }
+
+        let deps = ensure_all_nodes_defined(&deps);
+        let sorted_nodes = topological_sort(&deps);
+
+        for unique_id in sorted_nodes {
+            // Get SQL from render results
+            // Get SQL from render results
+            if let Some((sql, _)) = resolved_state
+                .render_results
+                .rendering_results
+                .get(&unique_id)
+            {
+                use dbt_schemas::schemas::nodes::InternalDbtNodeAttributes;
+
+                let node: Option<&dyn InternalDbtNodeAttributes> =
+                    if let Some(n) = resolved_state.nodes.models.get(&unique_id) {
+                        Some(n.as_ref())
+                    } else if let Some(n) = resolved_state.nodes.seeds.get(&unique_id) {
+                        Some(n.as_ref())
+                    } else if let Some(n) = resolved_state.nodes.snapshots.get(&unique_id) {
+                        Some(n.as_ref())
+                    } else {
+                        None
+                    };
+
+                let sql_to_run = if let Some(node) = node {
+                    let schema = node.schema();
+                    let alias = node.alias();
+                    let materialization = node.materialized();
+
+                    match materialization {
+                        DbtMaterialization::View => {
+                            format!("CREATE OR REPLACE VIEW {}.{} AS {}", schema, alias, sql)
+                        }
+                        DbtMaterialization::Table
+                        | DbtMaterialization::Incremental
+                        | DbtMaterialization::Seed
+                        | DbtMaterialization::Snapshot => {
+                            format!("CREATE OR REPLACE TABLE {}.{} AS {}", schema, alias, sql)
+                        }
+                        DbtMaterialization::Ephemeral => {
+                            println!("Skipping ephemeral node: {}", unique_id);
+                            continue;
+                        }
+                        _ => {
+                            println!(
+                                "Warning: Unknown materialization {:?} for {}, executing raw SQL",
+                                materialization, unique_id
+                            );
+                            sql.clone()
+                        }
+                    }
+                } else {
+                    sql.clone()
+                };
+
+                // Use a new connection for each node execution (simple serial execution)
+                let mut conn = engine
+                    .new_connection(None, Some(unique_id.clone()))
+                    .map_err(|e| fs_err!(ErrorCode::Generic, "Connection error: {}", e))?;
+
+                // Simple execution log
+                emit_info_progress_message(
+                    ProgressMessage::new_from_action_and_target(
+                        "Exec".to_string(),
+                        unique_id.clone(),
+                    ),
+                    arg.io.status_reporter.as_ref(),
+                );
+
+                let ctx = QueryCtx::new("dbt run")
+                    .with_node_id(unique_id.clone())
+                    .with_phase("run");
+
+                // println!("Executing node: {}", unique_id);
+                // println!("SQL: {}", sql_to_run);
+                engine
+                    .execute(None, &mut *conn, &ctx, &sql_to_run)
+                    .map_err(|e| fs_err!(ErrorCode::Generic, "Execution error: {}", e))?;
+            }
+        }
     }
 
     Ok(get_exit_code_from_error_counter())
