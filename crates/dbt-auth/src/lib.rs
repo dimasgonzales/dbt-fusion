@@ -10,6 +10,7 @@ mod config;
 // Database-specific auth implementations
 mod bigquery;
 mod databricks;
+mod duckdb;
 mod postgres;
 mod redshift;
 mod salesforce;
@@ -35,7 +36,7 @@ pub fn auth_for_backend(backend: Backend) -> Box<dyn Auth> {
         Backend::Databricks | Backend::DatabricksODBC => Box::new(databricks::DatabricksAuth {}),
         Backend::Redshift | Backend::RedshiftODBC => Box::new(redshift::RedshiftAuth {}),
         Backend::Salesforce => Box::new(salesforce::SalesforceAuth {}),
-        Backend::DuckDB => unimplemented!("duckdb backend authentication"),
+        Backend::DuckDB => Box::new(duckdb::DuckdbAuth {}),
         Backend::Generic { .. } => unimplemented!("generic backend authentication"),
     }
 }
