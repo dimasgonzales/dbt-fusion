@@ -365,4 +365,251 @@ mod tests {
         assert_eq!(relation.get_schema().unwrap(), "my_schema");
         assert_eq!(relation.get_identifier().unwrap(), "my_table");
     }
+
+    // ==================== Additional Coverage Tests ====================
+
+    #[test]
+    fn test_get_canonical_fqn() {
+        let relation = DuckdbRelation::try_new(
+            Some("MyDB".to_string()),
+            Some("MySchema".to_string()),
+            Some("MyTable".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let fqn = relation.get_canonical_fqn().unwrap();
+        // With default quoting (all true), identifiers preserve case
+        assert_eq!(fqn.to_string(), "MyDB.MySchema.MyTable");
+    }
+
+    #[test]
+    fn test_get_canonical_fqn_lowercase_when_not_quoted() {
+        let relation = DuckdbRelation::try_new_with_policy(
+            RelationPath {
+                database: Some("MyDB".to_string()),
+                schema: Some("MySchema".to_string()),
+                identifier: Some("MyTable".to_string()),
+            },
+            Some(RelationType::Table),
+            Policy::enabled(),
+            Policy {
+                database: false,
+                schema: false,
+                identifier: false,
+            },
+        )
+        .unwrap();
+
+        let fqn = relation.get_canonical_fqn().unwrap();
+        // Without quoting, identifiers are lowercased
+        assert_eq!(fqn.to_string(), "mydb.myschema.mytable");
+    }
+
+    #[test]
+    fn test_as_any() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let any_ref = relation.as_any();
+        assert!(any_ref.downcast_ref::<DuckdbRelation>().is_some());
+    }
+
+    #[test]
+    fn test_as_value() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let value = relation.as_value();
+        assert!(!value.is_undefined());
+    }
+
+    #[test]
+    fn test_adapter_type_method() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        assert_eq!(relation.adapter_type(), Some("duckdb".to_string()));
+    }
+
+    #[test]
+    fn test_create_relation() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let new_relation = relation
+            .create_relation(
+                Some("new_db".to_string()),
+                Some("new_schema".to_string()),
+                Some("new_table".to_string()),
+                Some(RelationType::View),
+                DEFAULT_RESOLVED_QUOTING,
+            )
+            .unwrap();
+
+        assert_eq!(new_relation.relation_type(), Some(RelationType::View));
+    }
+
+    #[test]
+    fn test_information_schema_inner() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let result = relation.information_schema_inner(Some("db".to_string()), Some("tables"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_database_value() {
+        let relation = DuckdbRelation::try_new(
+            Some("test_db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let db_value = relation.database();
+        assert_eq!(db_value.as_str(), Some("test_db"));
+    }
+
+    #[test]
+    fn test_schema_value() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("test_schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let schema_value = relation.schema();
+        assert_eq!(schema_value.as_str(), Some("test_schema"));
+    }
+
+    #[test]
+    fn test_identifier_value() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("test_table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let id_value = relation.identifier();
+        assert_eq!(id_value.as_str(), Some("test_table"));
+    }
+
+    #[test]
+    fn test_get_database_missing() {
+        let relation = DuckdbRelation::try_new_with_policy(
+            RelationPath {
+                database: None,
+                schema: Some("schema".to_string()),
+                identifier: Some("table".to_string()),
+            },
+            Some(RelationType::Table),
+            Policy::enabled(),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let result = relation.get_database();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_schema_missing() {
+        let relation = DuckdbRelation::try_new_with_policy(
+            RelationPath {
+                database: Some("db".to_string()),
+                schema: None,
+                identifier: Some("table".to_string()),
+            },
+            Some(RelationType::Table),
+            Policy::enabled(),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let result = relation.get_schema();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_identifier_missing() {
+        let relation = DuckdbRelation::try_new_with_policy(
+            RelationPath {
+                database: Some("db".to_string()),
+                schema: Some("schema".to_string()),
+                identifier: None,
+            },
+            Some(RelationType::Table),
+            Policy::enabled(),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        let result = relation.get_identifier();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_policy() {
+        let custom_quoting = Policy {
+            database: true,
+            schema: false,
+            identifier: true,
+        };
+        let relation = DuckdbRelation::try_new_with_policy(
+            RelationPath {
+                database: Some("db".to_string()),
+                schema: Some("schema".to_string()),
+                identifier: Some("table".to_string()),
+            },
+            Some(RelationType::Table),
+            Policy::enabled(),
+            custom_quoting,
+        )
+        .unwrap();
+
+        assert!(relation.quote_policy().database);
+        assert!(!relation.quote_policy().schema);
+        assert!(relation.quote_policy().identifier);
+    }
 }
