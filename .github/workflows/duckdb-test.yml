@@ -1,0 +1,77 @@
+name: DuckDB Tests
+
+on:
+  push:
+    branches: [main, 'duckdb/*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build and run integration tests
+  build-and-test:
+    name: Build & Integration Test
+    # Only run on the fork, not upstream dbt-labs/dbt-fusion
+    if: github.repository == 'dimasgonzales/dbt-fusion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build dbt-sa-cli
+        run: |
+          cargo build --release -p dbt-sa-cli 2>&1 | tee build.log
+          if grep -q "warning:.*crates/dbt-sa-cli" build.log; then
+            echo "::error::dbt-sa-cli has warnings"
+            exit 1
+          fi
+          echo "$(pwd)/target/release" >> $GITHUB_PATH
+
+      - name: Verify dbt-fusion binary
+        run: ./target/release/dbt-sa-cli --help
+
+  # Run doc tests and unit tests
+  tests:
+    name: Doc Tests & Unit Tests
+    # Only run on the fork, not upstream dbt-labs/dbt-fusion
+    if: github.repository == 'dimasgonzales/dbt-fusion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run doc tests
+        run: cargo test --doc -p dbt-adapter -p dbt-sa-cli
+
+      - name: Run unit tests (scoped to DuckDB packages)
+        run: cargo nextest run -p dbt-adapter -p dbt-sa-cli -p dbt-auth -p dbt-schemas -p dbt-loader
