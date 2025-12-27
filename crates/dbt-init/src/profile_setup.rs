@@ -161,6 +161,7 @@ impl ProfileSetup {
             AdapterType::Bigquery,
             AdapterType::Postgres,
             AdapterType::Redshift,
+            AdapterType::DuckDb,
         ]
     }
 
@@ -231,6 +232,7 @@ impl ProfileSetup {
                 };
                 todo!("setup_salesforce_profile")
             }
+            AdapterType::DuckDb => todo!("setup_duckdb_profile"),
         };
 
         let mut outputs = HashMap::new();
