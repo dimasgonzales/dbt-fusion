@@ -9,6 +9,7 @@ use dbt_common::{ErrorCode, FsResult, err, fs_err};
 use pathdiff::diff_paths;
 use std::path::PathBuf;
 
+use dbt_schemas::schemas::profiles::DbConfig;
 use dbt_schemas::schemas::project::DbtProjectSimplified;
 use dbt_schemas::state::DbtProfile;
 
@@ -80,14 +81,17 @@ pub fn load_profiles<S: Serialize>(
 
     // TODO: Certain databases enforce that database and schema are specified
     let database = db_config
-        .get_database()
-        .map(String::as_str)
-        .unwrap_or("dbt")
-        .to_string();
+        .get_database_string()
+        .unwrap_or_else(|| "dbt".to_string());
+    let default_schema = if let DbConfig::DuckDb(_) = db_config {
+        "main"
+    } else {
+        "public"
+    };
     let schema = db_config
         .get_schema()
         .map(String::as_str)
-        .unwrap_or("public")
+        .unwrap_or(default_schema)
         .to_string();
 
     Ok(DbtProfile {
