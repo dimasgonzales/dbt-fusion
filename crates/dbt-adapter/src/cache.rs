@@ -50,19 +50,19 @@ struct SchemaEntry {
 /// A dialect agnostic cache of [RelationCacheEntry]
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use std::sync::Arc;
 /// use dbt_schemas::schemas::relations::base::BaseRelation;
 /// use dbt_adapter::cache::{RelationCache, RelationCacheEntry};
 ///
-/// let cache = RelationCache::new();
+/// let cache = RelationCache::default();
 /// let relation: Arc<dyn BaseRelation> = // ... some relation
 ///
 /// // Insert relation into cache
-/// cache.insert_relation(relation.clone());
+/// cache.insert_relation(relation.clone(), None);
 ///
 /// // Retrieve cached relation
-/// let cached: Option<RelationCacheEntry> = cache.get_relation(relation);
+/// let cached: Option<RelationCacheEntry> = cache.get_relation(&relation);
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct RelationCache {

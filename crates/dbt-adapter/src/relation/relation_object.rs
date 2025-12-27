@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::relation::bigquery::*;
 use crate::relation::databricks::DatabricksRelation;
+use crate::relation::duckdb::DuckdbRelation;
 use crate::relation::postgres::PostgresRelation;
 use crate::relation::redshift::RedshiftRelation;
 use crate::relation::salesforce::SalesforceRelation;
@@ -243,6 +244,13 @@ pub fn create_relation(
             identifier,
             relation_type,
         )) as Arc<dyn BaseRelation>,
+        AdapterType::DuckDb => Arc::new(DuckdbRelation::try_new(
+            Some(database),
+            Some(schema),
+            identifier,
+            relation_type,
+            custom_quoting,
+        )?) as Arc<dyn BaseRelation>,
     };
     Ok(relation)
 }
