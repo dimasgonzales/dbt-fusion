@@ -7,6 +7,6 @@
                 case when {{first_date}} <= {{second_date}} then 1 else 0 end
         end)
     {% else %}
-        (date_diff('{{ datepart }}', {{ first_date }}::timestamp, {{ second_date}}::timestamp ))
+        (date_diff('{{ datepart }}', {{ first_date }}::timestamp, {{ second_date }}::timestamp ))
     {% endif %}
 {%- endmacro %}

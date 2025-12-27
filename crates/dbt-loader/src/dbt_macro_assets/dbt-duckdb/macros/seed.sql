@@ -37,9 +37,9 @@
             {% for row in chunk -%}
                 ({%- for column in agate_table.column_names -%}
                     {{ get_binding_char() }}
-                    {%- if not loop.last%},{%- endif %}
+                    {%- if not loop.last %},{%- endif %}
                 {%- endfor -%})
-                {%- if not loop.last%},{%- endif %}
+                {%- if not loop.last %},{%- endif %}
             {%- endfor %}
         {% endset %}
 
