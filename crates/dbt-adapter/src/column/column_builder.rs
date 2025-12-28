@@ -26,7 +26,7 @@ impl ColumnBuilder {
             Bigquery => Ok(Self::build_bigquery(field, type_ops)),
             Databricks => Ok(Self::build_databricks(field, type_ops)),
             Redshift => Ok(Self::build_redshift(field, type_ops)),
-            Postgres | Salesforce => Ok(Self::build_postgres_like(field, type_ops)),
+            Postgres | Salesforce | DuckDb => Ok(Self::build_postgres_like(field, type_ops)),
         }
     }
 
@@ -72,6 +72,14 @@ impl ColumnBuilder {
                 None, // numeric_scale
             ),
             Salesforce => todo!("Salesforce column creation not implemented yet"),
+            DuckDb => Column::new(
+                DuckDb,
+                name,
+                dtype,
+                char_size,
+                numeric_precision,
+                numeric_scale,
+            ),
         }
     }
 
@@ -359,5 +367,87 @@ impl ColumnBuilder {
             numeric_precision.map(|p| p as u64),
             numeric_scale.map(|s| s as u64),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql_types::NaiveTypeOpsImpl;
+    use arrow_schema::{DataType, Field};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_build_duckdb_column() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+        let type_ops = NaiveTypeOpsImpl::new(AdapterType::DuckDb);
+
+        // Test building a simple text column
+        let field: FieldRef = Arc::new(Field::new("test_col", DataType::Utf8, true));
+        let column = builder
+            .build(&field, &type_ops)
+            .expect("should build column");
+
+        assert_eq!(column.name(), "test_col");
+        // DuckDb uses postgres-like formatting - verify a reasonable text type is returned
+        let dtype = column.dtype();
+        assert!(
+            dtype.contains("character varying")
+                || dtype.contains("varchar")
+                || dtype.contains("text")
+                || dtype.contains("string"),
+            "expected text-like dtype, got: {dtype}"
+        );
+    }
+
+    #[test]
+    fn test_build_duckdb_integer_column() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+        let type_ops = NaiveTypeOpsImpl::new(AdapterType::DuckDb);
+
+        let field: FieldRef = Arc::new(Field::new("id", DataType::Int64, false));
+        let column = builder
+            .build(&field, &type_ops)
+            .expect("should build column");
+
+        assert_eq!(column.name(), "id");
+        assert!(column.dtype().contains("bigint") || column.dtype().contains("int"));
+    }
+
+    #[test]
+    fn test_build_from_parts_duckdb() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+
+        let column = builder.build_from_parts(
+            "test_column".to_string(),
+            "varchar".to_string(),
+            Some(255),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(column.name(), "test_column");
+        assert_eq!(column.dtype(), "varchar");
+        assert_eq!(column.char_size(), Some(255));
+    }
+
+    #[test]
+    fn test_build_from_parts_duckdb_numeric() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+
+        let column = builder.build_from_parts(
+            "price".to_string(),
+            "numeric".to_string(),
+            None,
+            Some(10),
+            Some(2),
+            None,
+        );
+
+        assert_eq!(column.name(), "price");
+        assert_eq!(column.dtype(), "numeric");
+        assert_eq!(column.numeric_precision(), Some(10));
+        assert_eq!(column.numeric_scale(), Some(2));
     }
 }

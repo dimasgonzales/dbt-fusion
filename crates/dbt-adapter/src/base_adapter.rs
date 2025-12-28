@@ -38,6 +38,7 @@ pub fn backend_of(adapter_type: AdapterType) -> Backend {
         AdapterType::Databricks => Backend::Databricks,
         AdapterType::Redshift => Backend::Redshift,
         AdapterType::Salesforce => Backend::Salesforce,
+        AdapterType::DuckDb => Backend::DuckDB,
     }
 }
 
@@ -1223,4 +1224,27 @@ pub fn is_supported_dialect(adapter_type: AdapterType) -> bool {
             | AdapterType::Redshift
             | AdapterType::Databricks
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbt_xdbc::Backend;
+
+    #[test]
+    fn test_backend_of_duckdb() {
+        assert_eq!(backend_of(AdapterType::DuckDb), Backend::DuckDB);
+    }
+
+    #[test]
+    fn test_backend_of_all_adapters() {
+        // Verify all adapter types map to expected backends
+        assert_eq!(backend_of(AdapterType::Postgres), Backend::Postgres);
+        assert_eq!(backend_of(AdapterType::Snowflake), Backend::Snowflake);
+        assert_eq!(backend_of(AdapterType::Bigquery), Backend::BigQuery);
+        assert_eq!(backend_of(AdapterType::Databricks), Backend::Databricks);
+        assert_eq!(backend_of(AdapterType::Redshift), Backend::Redshift);
+        assert_eq!(backend_of(AdapterType::Salesforce), Backend::Salesforce);
+        assert_eq!(backend_of(AdapterType::DuckDb), Backend::DuckDB);
+    }
 }
