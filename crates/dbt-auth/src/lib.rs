@@ -10,6 +10,7 @@ mod config;
 // Database-specific auth implementations
 mod bigquery;
 mod databricks;
+mod duckdb;
 mod postgres;
 mod redshift;
 mod salesforce;
@@ -35,7 +36,7 @@ pub fn auth_for_backend(backend: Backend) -> Box<dyn Auth> {
         Backend::Databricks | Backend::DatabricksODBC => Box::new(databricks::DatabricksAuth {}),
         Backend::Redshift | Backend::RedshiftODBC => Box::new(redshift::RedshiftAuth {}),
         Backend::Salesforce => Box::new(salesforce::SalesforceAuth {}),
-        Backend::DuckDB => unimplemented!("duckdb backend authentication"),
+        Backend::DuckDB => Box::new(duckdb::DuckdbAuth {}),
         Backend::Generic { .. } => unimplemented!("generic backend authentication"),
     }
 }
@@ -99,5 +100,54 @@ impl From<serde_json::Error> for AuthError {
 impl From<dbt_serde_yaml::Error> for AuthError {
     fn from(err: dbt_serde_yaml::Error) -> Self {
         AuthError::YAML(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbt_xdbc::Backend;
+
+    #[test]
+    fn test_auth_for_backend_duckdb() {
+        let auth = auth_for_backend(Backend::DuckDB);
+        assert_eq!(auth.backend(), Backend::DuckDB);
+    }
+
+    #[test]
+    fn test_auth_for_backend_postgres() {
+        let auth = auth_for_backend(Backend::Postgres);
+        assert_eq!(auth.backend(), Backend::Postgres);
+    }
+
+    #[test]
+    fn test_auth_for_backend_snowflake() {
+        let auth = auth_for_backend(Backend::Snowflake);
+        assert_eq!(auth.backend(), Backend::Snowflake);
+    }
+
+    #[test]
+    fn test_auth_for_backend_bigquery() {
+        let auth = auth_for_backend(Backend::BigQuery);
+        assert_eq!(auth.backend(), Backend::BigQuery);
+    }
+
+    #[test]
+    fn test_auth_for_backend_databricks() {
+        let auth = auth_for_backend(Backend::Databricks);
+        assert_eq!(auth.backend(), Backend::Databricks);
+    }
+
+    #[test]
+    fn test_auth_for_backend_redshift() {
+        let auth = auth_for_backend(Backend::Redshift);
+        // Redshift can return Redshift or RedshiftODBC depending on feature flags
+        assert!(auth.backend() == Backend::Redshift || auth.backend() == Backend::RedshiftODBC);
+    }
+
+    #[test]
+    fn test_auth_for_backend_salesforce() {
+        let auth = auth_for_backend(Backend::Salesforce);
+        assert_eq!(auth.backend(), Backend::Salesforce);
     }
 }

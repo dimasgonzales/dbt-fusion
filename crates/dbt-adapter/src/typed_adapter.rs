@@ -135,7 +135,7 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
         static REDSHIFT: [DbtIncrementalStrategy; 4] = [Append, DeleteInsert, Merge, Microbatch];
 
         match self.adapter_type() {
-            AdapterType::Postgres => &POSTGRES,
+            AdapterType::Postgres | AdapterType::DuckDb => &POSTGRES,
             AdapterType::Snowflake => &SNOWFLAKE,
             AdapterType::Bigquery => &BIGQUERY,
             AdapterType::Databricks => &DATABRICKS,
@@ -380,7 +380,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 self.execute_inner(
                     self.adapter_type().into(),
                     Arc::clone(self.engine()),
@@ -480,15 +481,16 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
                     compiled_code,
                 )
             }
-            AdapterType::Postgres | AdapterType::Redshift | AdapterType::Salesforce => {
-                Err(AdapterError::new(
-                    AdapterErrorKind::Internal,
-                    format!(
-                        "Python models are not supported for {} adapter",
-                        self.adapter_type()
-                    ),
-                ))
-            }
+            AdapterType::Postgres
+            | AdapterType::Redshift
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => Err(AdapterError::new(
+                AdapterErrorKind::Internal,
+                format!(
+                    "Python models are not supported for {} adapter",
+                    self.adapter_type()
+                ),
+            )),
         }
     }
 
@@ -498,7 +500,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Snowflake
             | AdapterType::Redshift
             | AdapterType::Postgres
-            | AdapterType::Salesforce => format!("\"{identifier}\""),
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => format!("\"{identifier}\""),
             AdapterType::Bigquery | AdapterType::Databricks => format!("`{identifier}`"),
         }
     }
@@ -510,7 +513,7 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
                 AdapterType::Snowflake => "name",
                 AdapterType::Databricks => "databaseName",
                 AdapterType::Bigquery => "schema_name",
-                AdapterType::Postgres | AdapterType::Redshift => "nspname",
+                AdapterType::Postgres | AdapterType::Redshift | AdapterType::DuckDb => "nspname",
                 AdapterType::Salesforce => "name",
             };
             get_column_values::<StringArray>(&result_set, col_name)?
@@ -622,7 +625,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Bigquery
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 let err = format!(
                     "describe_dynamic_table is not supported by the {} adapter",
                     self.adapter_type()
@@ -792,7 +796,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Postgres
             | AdapterType::Snowflake
             | AdapterType::Bigquery
-            | AdapterType::Redshift => execute_macro(
+            | AdapterType::Redshift
+            | AdapterType::DuckDb => execute_macro(
                 state,
                 &[RelationObject::new(relation).as_value()],
                 "get_columns_in_relation",
@@ -889,6 +894,10 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Salesforce => {
                 unimplemented!("Salesforce get_columns_in_relation not implemented")
             }
+            AdapterType::DuckDb => {
+                let result = macro_execution_result?;
+                Ok(Column::vec_from_jinja_value(self.adapter_type(), result)?)
+            }
         }
     }
 
@@ -917,7 +926,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Databricks
             | AdapterType::Redshift
             | AdapterType::Salesforce
-            | AdapterType::Postgres => {
+            | AdapterType::Postgres
+            | AdapterType::DuckDb => {
                 // downcast relation
                 let relation = RelationObject::new(relation).as_value();
                 execute_macro(state, &[relation], "truncate_relation")?;
@@ -962,7 +972,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Postgres
             | AdapterType::Bigquery
             | AdapterType::Databricks
-            | AdapterType::Redshift => {
+            | AdapterType::Redshift
+            | AdapterType::DuckDb => {
                 // https://github.com/dbt-labs/dbt-adapters/blob/main/dbt-adapters/src/dbt/adapters/base/impl.py#L1072
                 if quote_config.unwrap_or(true) {
                     Ok(self.quote(column))
@@ -1126,7 +1137,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1142,7 +1154,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 // https://github.com/dbt-labs/dbt-adapters/blob/main/dbt-adapters/src/dbt/adapters/base/impl.py#L1783
                 let mut result = vec![];
                 for (_, column) in columns_map {
@@ -1302,6 +1315,14 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
 
             // Salesforce
             (Salesforce, _) => unimplemented!("Salesforce constraint support not implemented"),
+
+            // DuckDB - follows Postgres patterns
+            (DuckDb, NotNull) => Enforced,
+            (DuckDb, ForeignKey) => Enforced,
+            (DuckDb, Unique) => NotEnforced,
+            (DuckDb, PrimaryKey) => NotEnforced,
+            (DuckDb, Check) => NotSupported,
+            (DuckDb, Custom) => NotSupported,
         }
     }
 
@@ -1329,7 +1350,10 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
         let record_batch = grants_table.original_record_batch();
 
         match self.adapter_type() {
-            AdapterType::Postgres | AdapterType::Bigquery | AdapterType::Redshift => {
+            AdapterType::Postgres
+            | AdapterType::Bigquery
+            | AdapterType::Redshift
+            | AdapterType::DuckDb => {
                 let grantee_cols = get_column_values::<StringArray>(&record_batch, "grantee")?;
                 let privilege_cols =
                     get_column_values::<StringArray>(&record_batch, "privilege_type")?;
@@ -1405,7 +1429,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1478,7 +1503,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1519,7 +1545,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1559,7 +1586,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1630,7 +1658,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Postgres
             | AdapterType::Snowflake
             | AdapterType::Databricks
-            | AdapterType::Redshift => {
+            | AdapterType::Redshift
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery or Salesforce adapter")
             }
         }
@@ -1689,7 +1718,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with BigQuery adapter")
             }
         }
@@ -1868,7 +1898,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             AdapterType::Snowflake
             | AdapterType::Bigquery
             | AdapterType::Databricks
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!("only available with either Postgres or Redshift adapter")
             }
         }
@@ -1936,7 +1967,8 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             | AdapterType::Snowflake
             | AdapterType::Databricks
             | AdapterType::Redshift
-            | AdapterType::Salesforce => {
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => {
                 unimplemented!(
                     "is_replaceable is only available with BigQuery adapter, not {}",
                     self.adapter_type()
@@ -2092,7 +2124,7 @@ pub trait TypedBaseAdapter: fmt::Debug + Send + Sync + AdapterTyping {
             Bigquery => bigquery::list_relations(adapter, query_ctx, conn, db_schema),
             Databricks => databricks::list_relations(adapter, query_ctx, conn, db_schema),
             Redshift => redshift::list_relations(adapter, query_ctx, conn, db_schema),
-            Postgres | Salesforce => {
+            Postgres | Salesforce | DuckDb => {
                 let err = AdapterError::new(
                     AdapterErrorKind::Internal,
                     format!(
@@ -2169,7 +2201,8 @@ prevent unnecessary latency for other users."#,
             AdapterType::Bigquery
             | AdapterType::Postgres
             | AdapterType::Redshift
-            | AdapterType::Salesforce => vec![],
+            | AdapterType::Salesforce
+            | AdapterType::DuckDb => vec![],
         }
     }
 
@@ -2532,6 +2565,10 @@ impl AdapterTyping for ConcreteAdapter {
                 Box::new(SalesforceMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
             }
             AdapterType::Postgres => {
+                Box::new(PostgresMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
+            }
+            AdapterType::DuckDb => {
+                // DuckDB uses Postgres metadata adapter since it's PostgreSQL-compatible
                 Box::new(PostgresMetadataAdapter::new(engine)) as Box<dyn MetadataAdapter>
             }
         };

@@ -51,6 +51,10 @@ pub fn get_relation(
         AdapterType::Salesforce => {
             salesforce_get_relation(adapter, state, ctx, conn, database, schema, identifier)
         }
+        AdapterType::DuckDb => {
+            // DuckDB is PostgreSQL-compatible, so we use postgres_get_relation
+            postgres_get_relation(adapter, state, ctx, conn, database, schema, identifier)
+        }
     }
 }
 
