@@ -161,6 +161,7 @@ impl ProfileSetup {
             AdapterType::Bigquery,
             AdapterType::Postgres,
             AdapterType::Redshift,
+            AdapterType::DuckDb,
         ]
     }
 
@@ -233,7 +234,6 @@ impl ProfileSetup {
             }
             AdapterType::DuckDb => {
                 // DuckDb profile setup is not yet implemented
-                // DbConfig::DuckDb variant does not exist yet
                 todo!("setup_duckdb_profile")
             }
         };
