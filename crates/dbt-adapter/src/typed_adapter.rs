@@ -2718,6 +2718,7 @@ mod tests {
 
     use minijinja::{Environment, State};
 
+    use arrow_schema::{Field, DataType};
     use AdapterType::*;
 
     fn engine(adapter_type: AdapterType) -> Arc<AdapterEngine> {
@@ -2732,13 +2733,13 @@ mod tests {
                 ("role".into(), "role".into()),
                 ("warehouse".into(), "warehouse".into()),
             ]),
-            Bigquery | Redshift => Mapping::new(),
+            Bigquery | Redshift | DuckDb => Mapping::new(),
             _ => unimplemented!("mock config for adapter type {:?}", adapter_type),
         };
         let auth = auth_for_backend(backend);
         let resolved_quoting = match adapter_type {
             Snowflake => SNOWFLAKE_RESOLVED_QUOTING,
-            Bigquery => DEFAULT_RESOLVED_QUOTING,
+            Bigquery | DuckDb => DEFAULT_RESOLVED_QUOTING,
             _ => DEFAULT_RESOLVED_QUOTING,
         };
         AdapterEngine::new(
@@ -2758,6 +2759,33 @@ mod tests {
     fn test_adapter_type() {
         let adapter = ConcreteAdapter::new(engine(Snowflake));
         assert_eq!(adapter.adapter_type(), Snowflake);
+        
+        let adapter = ConcreteAdapter::new(engine(DuckDb));
+        assert_eq!(adapter.adapter_type(), DuckDb);
+    }
+
+    #[test]
+    fn test_valid_incremental_strategies_duckdb() {
+        let adapter = ConcreteAdapter::new(engine(DuckDb));
+        let strategies = adapter.valid_incremental_strategies();
+        assert!(strategies.contains(&DbtIncrementalStrategy::Merge));
+        assert!(strategies.contains(&DbtIncrementalStrategy::Append));
+    }
+
+    #[test]
+    fn test_list_schemas_duckdb() {
+        let adapter = ConcreteAdapter::new(engine(DuckDb));
+        let schema = Schema::new(vec![
+            Field::new("schema_name", DataType::Utf8, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(StringArray::from(vec!["main", "other"]))],
+        )
+        .unwrap();
+
+        let schemas = adapter.list_schemas(Arc::new(batch)).unwrap();
+        assert_eq!(schemas, vec!["main", "other"]);
     }
 
     #[test]
@@ -2819,5 +2847,21 @@ mod tests {
     fn test_redshift_quote() {
         let adapter = ConcreteAdapter::new(engine(Redshift));
         assert_eq!(adapter.quote("abc"), "\"abc\"");
+    }
+
+    #[test]
+    fn test_adapter_constraint_support_duckdb() {
+        use dbt_schemas::schemas::common::ConstraintSupport::*;
+        use dbt_schemas::schemas::common::ConstraintType::*;
+
+        let adapter = ConcreteAdapter::new(engine(DuckDb));
+        
+        // DuckDB constraints follow Postgres patterns
+        assert_eq!(adapter.get_constraint_support(NotNull), Enforced);
+        assert_eq!(adapter.get_constraint_support(ForeignKey), Enforced);
+        assert_eq!(adapter.get_constraint_support(Unique), NotEnforced);
+        assert_eq!(adapter.get_constraint_support(PrimaryKey), NotEnforced);
+        assert_eq!(adapter.get_constraint_support(Check), NotSupported);
+        assert_eq!(adapter.get_constraint_support(Custom), NotSupported);
     }
 }

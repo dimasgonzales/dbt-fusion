@@ -612,4 +612,43 @@ mod tests {
         assert!(!relation.quote_policy().schema);
         assert!(relation.quote_policy().identifier);
     }
+
+    #[test]
+    fn test_include_inner_modifies_include_policy() {
+        let relation = DuckdbRelation::try_new(
+            Some("db".to_string()),
+            Some("schema".to_string()),
+            Some("table".to_string()),
+            Some(RelationType::Table),
+            DEFAULT_RESOLVED_QUOTING,
+        )
+        .unwrap();
+
+        // Create a policy that excludes database
+        let new_policy = Policy {
+            database: false,
+            schema: true,
+            identifier: true,
+        };
+        let result = relation.include_inner(new_policy).unwrap();
+
+        // Verify the result is a valid relation object
+        let new_relation = result.downcast_object::<RelationObject>().unwrap();
+        
+        // The rendered output should NOT include the database when policy excludes it
+        let rendered = new_relation.inner().render_self().unwrap();
+        let rendered_str = rendered.as_str().unwrap();
+        
+        // Should render as "schema"."table" without the database prefix
+        assert!(
+            !rendered_str.starts_with("\"db\""),
+            "With database excluded from include policy, rendered should not start with database. Got: {}",
+            rendered_str
+        );
+        assert!(
+            rendered_str.contains("\"schema\"") && rendered_str.contains("\"table\""),
+            "Should still contain schema and table. Got: {}",
+            rendered_str
+        );
+    }
 }

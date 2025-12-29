@@ -389,15 +389,22 @@ mod tests {
             .expect("should build column");
 
         assert_eq!(column.name(), "test_col");
-        // DuckDb uses postgres-like formatting - verify a reasonable text type is returned
+        // DuckDb uses postgres-like formatting
         let dtype = column.dtype();
+        
+        // Check each possibility separately to avoid short-circuiting in coverage reports
+        let is_char_varying = dtype.contains("character varying");
+        let is_varchar = dtype.contains("varchar");
+        let is_text = dtype.contains("text");
+        let is_string = dtype.contains("string");
+        
         assert!(
-            dtype.contains("character varying")
-                || dtype.contains("varchar")
-                || dtype.contains("text")
-                || dtype.contains("string"),
+            is_char_varying || is_varchar || is_text || is_string,
             "expected text-like dtype, got: {dtype}"
         );
+        
+        // Specifically for our implementation, it should be character varying
+        assert!(is_char_varying, "expected 'character varying' for DataType::Utf8, got: {dtype}");
     }
 
     #[test]
@@ -449,5 +456,63 @@ mod tests {
         assert_eq!(column.dtype(), "numeric");
         assert_eq!(column.numeric_precision(), Some(10));
         assert_eq!(column.numeric_scale(), Some(2));
+    }
+
+    #[test]
+    fn test_build_duckdb_not_null_column() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+        let type_ops = NaiveTypeOpsImpl::new(AdapterType::DuckDb);
+
+        // Create a non-nullable field (nullable = false)
+        let field: FieldRef = Arc::new(Field::new("required_col", DataType::Int64, false));
+        let column = builder
+            .build(&field, &type_ops)
+            .expect("should build column");
+
+        // Non-nullable columns should include "not null" in dtype (postgres-like behavior)
+        assert!(
+            column.dtype().contains("not null"),
+            "non-nullable column should have 'not null' in dtype, got: {}",
+            column.dtype()
+        );
+    }
+
+    #[test]
+    fn test_build_duckdb_nullable_column_no_not_null() {
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+        let type_ops = NaiveTypeOpsImpl::new(AdapterType::DuckDb);
+
+        // Create a nullable field (nullable = true)
+        let field: FieldRef = Arc::new(Field::new("optional_col", DataType::Int64, true));
+        let column = builder
+            .build(&field, &type_ops)
+            .expect("should build column");
+
+        // Nullable columns should NOT have "not null" in dtype
+        assert!(
+            !column.dtype().contains("not null"),
+            "nullable column should NOT have 'not null' in dtype, got: {}",
+            column.dtype()
+        );
+    }
+
+    #[test]
+    fn test_build_duckdb_timestamp_column() {
+        use arrow_schema::TimeUnit;
+        let builder = ColumnBuilder::new(AdapterType::DuckDb);
+        let type_ops = NaiveTypeOpsImpl::new(AdapterType::DuckDb);
+
+        let field: FieldRef = Arc::new(Field::new(
+            "created_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ));
+        let column = builder
+            .build(&field, &type_ops)
+            .expect("should build column");
+
+        assert_eq!(column.name(), "created_at");
+        // DuckDB maps Timestamp to "datetime" via the postgres-like path
+        assert!(column.dtype().contains("datetime"), "expected datetime, got: {}", column.dtype());
     }
 }
