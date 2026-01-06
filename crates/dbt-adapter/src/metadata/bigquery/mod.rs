@@ -201,15 +201,17 @@ impl TrieNode {
 
 /// Example:
 ///
-///     columns: {
-///         "a": {"name": "a", "data_type": "string", "description": ...},
-///         "b.nested": {"name": "b.nested", "data_type": "string"},
-///         "b.nested2": {"name": "b.nested2", "data_type": "string"}
-///     }
-///     returns: {
-///         "a": {"name": "a", "data_type": "string"},
-///         "b": {"name": "b": "data_type": "struct<nested string, nested2 string>}
-///     }
+/// ```text
+/// columns: {
+///     "a": {"name": "a", "data_type": "string", "description": ...},
+///     "b.nested": {"name": "b.nested", "data_type": "string"},
+///     "b.nested2": {"name": "b.nested2", "data_type": "string"}
+/// }
+/// returns: {
+///     "a": {"name": "a", "data_type": "string"},
+///     "b": {"name": "b", "data_type": "struct<nested string, nested2 string>"}
+/// }
+/// ```
 ///
 /// arbitrarily nested struct/array types are allowed, for more details check out the
 /// tests/data/nest_column_data_types example
@@ -794,10 +796,12 @@ impl MetadataAdapter for BigqueryMetadataAdapter {
                     }
                 }
 
-                if let Some(schema_type) = schema.metadata().get("Type") {
-                    if schema_type == "EXTERNAL" {
-                        schema_builder.push(Field::new("_FILE_NAME", DataType::Utf8, true));
-                    }
+                if schema
+                    .metadata()
+                    .get("Type")
+                    .is_some_and(|schema_type| schema_type == "EXTERNAL")
+                {
+                    schema_builder.push(Field::new("_FILE_NAME", DataType::Utf8, true));
                 }
 
                 Ok(Arc::new(schema_builder.finish()))

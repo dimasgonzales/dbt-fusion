@@ -231,6 +231,11 @@ impl ProfileSetup {
                 };
                 todo!("setup_salesforce_profile")
             }
+            AdapterType::DuckDb => {
+                // DuckDb profile setup is not yet implemented
+                // DbConfig::DuckDb variant does not exist yet
+                todo!("setup_duckdb_profile")
+            }
         };
 
         let mut outputs = HashMap::new();
