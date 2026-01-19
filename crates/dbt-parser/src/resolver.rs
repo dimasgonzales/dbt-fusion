@@ -259,13 +259,16 @@ pub async fn resolve(
     }
 
     let parse_adapter = jinja_env
-        .get_parse_adapter()
+        .get_adapter()
         .expect("parse adapter must be initialized");
+    let parse_adapter_state = parse_adapter
+        .parse_adapter_state()
+        .expect("adapter must be configured for the parse phase");
     let (
         get_relation_calls_from_parse,
         get_columns_in_relation_calls_from_parse,
         patterned_dangling_sources_from_parse,
-    ) = parse_adapter.relations_to_fetch();
+    ) = parse_adapter_state.relations_to_fetch();
     get_relation_calls.extend(get_relation_calls_from_parse?);
     get_columns_in_relation_calls.extend(get_columns_in_relation_calls_from_parse?);
     patterned_dangling_sources.extend(patterned_dangling_sources_from_parse);
@@ -458,11 +461,17 @@ pub async fn resolve_inner(
 
     let package_quoting = resolve_package_quoting(*package.dbt_project.quoting, adapter_type);
 
+    let namespace_keys: Vec<String> = jinja_env
+        .env
+        .get_macro_namespace_registry()
+        .map(|r| r.keys().map(|k| k.to_string()).collect())
+        .unwrap_or_default();
     let base_ctx = build_resolve_context(
         root_package_name,
         package.dbt_project.name.as_str(),
         &macros.docs_macros,
         DISPATCH_CONFIG.get().unwrap().read().unwrap().clone(),
+        namespace_keys,
     );
     // Resolve the dbt properties (schema.yml) files
     let mut min_properties = resolve_minimal_properties(

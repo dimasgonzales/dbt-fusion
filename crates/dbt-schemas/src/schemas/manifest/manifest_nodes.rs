@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
+use crate::schemas::serde::OmissibleGrantConfig;
 use dbt_common::serde_utils::Omissible;
 use dbt_serde_yaml::JsonSchema;
 use dbt_serde_yaml::Spanned;
@@ -24,8 +25,8 @@ use crate::schemas::serde::{bool_or_string_bool, default_type};
 type YmlValue = dbt_serde_yaml::Value;
 
 use crate::schemas::{
-    DbtAnalysis, DbtExposure, DbtFunction, DbtModel, DbtSeed, DbtSnapshot, DbtSource, DbtTest,
-    DbtUnitTest,
+    CommonAttributes, DbtAnalysis, DbtExposure, DbtFunction, DbtModel, DbtSeed, DbtSnapshot,
+    DbtSource, DbtTest, DbtUnitTest, NodeBaseAttributes,
     common::{
         Access, DbtChecksum, DbtContract, DbtMaterialization, DbtQuoting, Expect,
         FreshnessDefinition, Given, IncludeExclude, NodeDependsOn, PersistDocsConfig,
@@ -35,7 +36,10 @@ use crate::schemas::{
         DbtMetric, DbtOperation, DbtSavedQuery, DbtSemanticModel,
         common::{DbtOwner, SourceFileMetadata, WhereFilterIntersection},
         metric::{MeasureAggregationParameters, MetricTypeParams, NonAdditiveDimension},
-        semantic_model::{NodeRelation, SemanticEntity, SemanticMeasure, SemanticModelDefaults},
+        semantic_model::{
+            DbtSemanticModelAttr, NodeRelation, SemanticEntity, SemanticMeasure,
+            SemanticModelDefaults,
+        },
     },
     nodes::{ExposureType, TestMetadata},
     project::{
@@ -50,7 +54,7 @@ use crate::schemas::{
     },
     ref_and_source::{DbtRef, DbtSourceWrapper},
     semantic_layer::semantic_manifest::SemanticLayerElementConfig,
-    serde::{StringOrArrayOfStrings, StringOrInteger, serialize_string_or_array_map},
+    serde::{StringOrArrayOfStrings, StringOrInteger},
 };
 
 use dbt_common::io_args::StaticAnalysisKind;
@@ -574,8 +578,8 @@ pub struct ManifestModelConfig {
     pub unique_key: Option<DbtUniqueKey>,
     pub on_schema_change: Option<OnSchemaChange>,
     pub on_configuration_change: Option<OnConfigurationChange>,
-    #[serde(rename = "+grants", serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(rename = "+grants")]
+    pub grants: OmissibleGrantConfig,
     pub packages: Option<StringOrArrayOfStrings>,
     pub python_version: Option<String>,
     pub imports: Option<StringOrArrayOfStrings>,
@@ -599,6 +603,8 @@ pub struct ManifestModelConfig {
     pub custom_checks: Option<CustomChecks>,
     pub submission_method: Option<String>,
     pub job_cluster_config: Option<BTreeMap<String, YmlValue>>,
+    pub cluster_id: Option<String>,
+    pub http_path: Option<String>,
     pub create_notebook: Option<bool>,
     pub index_url: Option<String>,
     pub additional_libs: Option<Vec<YmlValue>>,
@@ -620,8 +626,8 @@ pub struct ManifestSeedConfig {
     pub docs: Option<DocsConfig>,
     #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub enabled: Option<bool>,
-    #[serde(default, serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(default)]
+    pub grants: OmissibleGrantConfig,
     #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub quote_columns: Option<bool>,
     pub delimiter: Option<Spanned<String>>,
@@ -744,6 +750,8 @@ impl From<ModelConfig> for ManifestModelConfig {
             custom_checks: config.custom_checks,
             submission_method: config.submission_method.clone(),
             job_cluster_config: config.job_cluster_config.clone(),
+            cluster_id: config.cluster_id.clone(),
+            http_path: config.http_path.clone(),
             create_notebook: config.create_notebook,
             index_url: config.index_url.clone(),
             additional_libs: config.additional_libs.clone(),
@@ -800,6 +808,8 @@ impl From<ManifestModelConfig> for ModelConfig {
             custom_checks: config.custom_checks,
             submission_method: config.submission_method.clone(),
             job_cluster_config: config.job_cluster_config.clone(),
+            cluster_id: config.cluster_id.clone(),
+            http_path: config.http_path.clone(),
             create_notebook: config.create_notebook,
             index_url: config.index_url.clone(),
             additional_libs: config.additional_libs.clone(),
@@ -1273,6 +1283,17 @@ impl From<SemanticModelConfig> for ManifestSemanticModelConfig {
     }
 }
 
+impl From<ManifestSemanticModelConfig> for SemanticModelConfig {
+    fn from(config: ManifestSemanticModelConfig) -> Self {
+        SemanticModelConfig {
+            enabled: Some(config.enabled),
+            meta: config.meta,
+            group: config.group,
+            tags: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ManifestSemanticModel {
@@ -1337,6 +1358,50 @@ impl From<DbtSemanticModel> for ManifestSemanticModel {
     }
 }
 
+impl From<ManifestSemanticModel> for DbtSemanticModel {
+    fn from(manifest_model: ManifestSemanticModel) -> Self {
+        DbtSemanticModel {
+            __common_attr__: CommonAttributes {
+                unique_id: manifest_model.__common_attr__.unique_id,
+                name: manifest_model.__common_attr__.name,
+                package_name: manifest_model.__common_attr__.package_name,
+                fqn: manifest_model.__common_attr__.fqn,
+                path: manifest_model.__common_attr__.path,
+                original_file_path: manifest_model.__common_attr__.original_file_path,
+                description: manifest_model.__common_attr__.description,
+                tags: manifest_model.__common_attr__.tags,
+                meta: manifest_model.__common_attr__.meta,
+                ..Default::default()
+            },
+            __base_attr__: NodeBaseAttributes {
+                depends_on: manifest_model.__base_attr__.depends_on,
+                refs: manifest_model.__base_attr__.refs,
+                ..Default::default()
+            },
+            __semantic_model_attr__: DbtSemanticModelAttr {
+                model: manifest_model.model,
+                node_relation: manifest_model.node_relation,
+                label: manifest_model.label,
+                defaults: manifest_model.defaults,
+                entities: manifest_model.entities,
+                dimensions: manifest_model.dimensions,
+                metadata: manifest_model.metadata,
+                primary_entity: manifest_model.primary_entity,
+                measures: manifest_model
+                    .measures
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                created_at: manifest_model.__base_attr__.created_at,
+                unrendered_config: manifest_model.__base_attr__.unrendered_config,
+                group: manifest_model.group,
+            },
+            deprecated_config: manifest_model.config.into(),
+            __other__: manifest_model.__other__,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestSemanticModelMeasure {
     pub name: String,
@@ -1354,6 +1419,23 @@ pub struct ManifestSemanticModelMeasure {
 impl From<SemanticMeasure> for ManifestSemanticModelMeasure {
     fn from(measure: SemanticMeasure) -> Self {
         Self {
+            name: measure.name,
+            agg: measure.agg,
+            description: measure.description,
+            label: measure.label,
+            create_metric: measure.create_metric,
+            expr: measure.expr,
+            agg_params: measure.agg_params,
+            non_additive_dimension: measure.non_additive_dimension,
+            agg_time_dimension: measure.agg_time_dimension,
+            config: measure.config,
+        }
+    }
+}
+
+impl From<ManifestSemanticModelMeasure> for SemanticMeasure {
+    fn from(measure: ManifestSemanticModelMeasure) -> Self {
+        SemanticMeasure {
             name: measure.name,
             agg: measure.agg,
             description: measure.description,

@@ -1,3 +1,4 @@
+use crate::schemas::serde::OmissibleGrantConfig;
 use dbt_serde_yaml::JsonSchema;
 use dbt_serde_yaml::ShouldBe;
 use dbt_serde_yaml::Spanned;
@@ -19,7 +20,6 @@ use crate::schemas::common::Hooks;
 use crate::schemas::common::PersistDocsConfig;
 use crate::schemas::common::Schedule;
 use crate::schemas::manifest::GrantAccessToTarget;
-use crate::schemas::manifest::postgres::PostgresIndex;
 use crate::schemas::manifest::{BigqueryClusterConfig, PartitionConfig};
 use crate::schemas::project::DefaultTo;
 use crate::schemas::project::TypedRecursiveConfig;
@@ -31,7 +31,9 @@ use crate::schemas::project::configs::common::default_quoting;
 use crate::schemas::project::configs::common::default_to_grants;
 use crate::schemas::serde::StringOrArrayOfStrings;
 use crate::schemas::serde::bool_or_string_bool;
-use crate::schemas::serde::{f64_or_string_f64, serialize_string_or_array_map, u64_or_string_u64};
+use crate::schemas::serde::{
+    IndexesConfig, PrimaryKeyConfig, f64_or_string_f64, u64_or_string_u64,
+};
 
 #[skip_serializing_none]
 #[derive(Deserialize, Serialize, Debug, Clone, JsonSchema)]
@@ -52,8 +54,8 @@ pub struct ProjectSeedConfig {
     pub event_time: Option<String>,
     #[serde(rename = "+full_refresh")]
     pub full_refresh: Option<bool>,
-    #[serde(rename = "+grants", serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(rename = "+grants")]
+    pub grants: OmissibleGrantConfig,
     #[serde(rename = "+group")]
     pub group: Option<String>,
     #[serde(rename = "+meta")]
@@ -255,7 +257,7 @@ pub struct ProjectSeedConfig {
 
     // Postgres specific fields
     #[serde(default, rename = "+indexes")]
-    pub indexes: Option<Vec<PostgresIndex>>,
+    pub indexes: IndexesConfig,
 
     // Schedule (Databricks streaming tables)
     #[serde(rename = "+schedule")]
@@ -287,8 +289,8 @@ pub struct SeedConfig {
     pub docs: Option<DocsConfig>,
     #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub enabled: Option<bool>,
-    #[serde(default, serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(default)]
+    pub grants: OmissibleGrantConfig,
     #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub quote_columns: Option<bool>,
     pub delimiter: Option<Spanned<String>>,
@@ -407,7 +409,7 @@ impl From<ProjectSeedConfig> for SeedConfig {
                 indexes: config.indexes,
 
                 // seed is unsupported for Salesforce yet
-                primary_key: None,
+                primary_key: PrimaryKeyConfig::default(),
                 category: None,
             },
         }

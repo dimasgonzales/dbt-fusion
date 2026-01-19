@@ -12,9 +12,12 @@ use dbt_telemetry::{ExecutionPhase, NodeEvaluated, NodeProcessed, NodeType};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 type YmlValue = dbt_serde_yaml::Value;
-use crate::schemas::common::{NodeInfo, NodeInfoWrapper, PersistDocsConfig, hooks_equal};
+use crate::schemas::common::{
+    NodeInfo, NodeInfoWrapper, PersistDocsConfig, hooks_equal, normalize_sql,
+};
 use crate::schemas::dbt_column::{DbtColumnRef, deserialize_dbt_columns, serialize_dbt_columns};
 use crate::schemas::manifest::{BigqueryClusterConfig, GrantAccessToTarget, PartitionConfig};
+use crate::schemas::project::configs::common::grants_eq;
 use crate::schemas::project::{StrictnessMode, WarehouseSpecificNodeConfig, same_warehouse_config};
 use crate::schemas::serde::StringOrArrayOfStrings;
 use crate::schemas::{
@@ -577,7 +580,47 @@ fn same_persisted_description(
             .map(|column| column.description.clone())
             .collect();
 
-        if self_column_descriptions != other_column_descriptions {
+        if !optional_string_vecs_equal(&self_column_descriptions, &other_column_descriptions) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Compare two vectors of Option<String> treating semantic equivalents of "empty" as equal.
+/// - `None` and `Some("")` are considered equal
+/// - `Some("")` and `Some("   ")` (whitespace-only) are considered equal
+/// - Vectors of different lengths are considered different
+fn optional_string_vecs_equal(a: &[Option<String>], b: &[Option<String>]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    /// Helper to check if an Option<String> is semantically empty
+    fn is_empty(opt: &Option<String>) -> bool {
+        match opt {
+            None => true,
+            Some(s) => s.trim().is_empty(),
+        }
+    }
+
+    for (a_item, b_item) in a.iter().zip(b.iter()) {
+        let a_empty = is_empty(a_item);
+        let b_empty = is_empty(b_item);
+
+        if a_empty && b_empty {
+            // Both are semantically empty - consider equal
+            continue;
+        }
+
+        if a_empty != b_empty {
+            // One is empty, one is not - not equal
+            return false;
+        }
+
+        // Both are non-empty, compare using normalize_sql which removes whitespace and lowercases
+        if a_item.as_ref().map(|s| normalize_sql(s)) != b_item.as_ref().map(|s| normalize_sql(s)) {
             return false;
         }
     }
@@ -834,7 +877,7 @@ fn seed_configs_equal(left: &SeedConfig, right: &SeedConfig) -> bool {
     btree_map_equal(&left.column_types, &right.column_types) &&
     docs_config_equal(&left.docs, &right.docs) &&
     left.enabled == right.enabled &&
-    btree_map_string_or_array_equal(&left.grants, &right.grants) &&
+    grants_eq(&left.grants, &right.grants) &&
     left.quote_columns == right.quote_columns &&
     // left.delimiter == right.delimiter && // TODO: re-enable when no longer using mantle/core manifests in IA
     left.event_time == right.event_time &&
@@ -867,19 +910,6 @@ fn btree_map_equal(
                 .collect();
             l_normalized == r_normalized
         }
-        (None, Some(r)) => r.is_empty(),
-        (Some(l), None) => l.is_empty(),
-    }
-}
-
-/// Compare BTreeMap<String, StringOrArrayOfStrings> considering None vs Some(empty) as equal
-fn btree_map_string_or_array_equal(
-    left: &Option<BTreeMap<String, StringOrArrayOfStrings>>,
-    right: &Option<BTreeMap<String, StringOrArrayOfStrings>>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(l), Some(r)) => l == r,
         (None, Some(r)) => r.is_empty(),
         (Some(l), None) => l.is_empty(),
     }
@@ -1540,8 +1570,7 @@ impl InternalDbtNode for DbtSnapshot {
             let post_hook_eq = hooks_equal(&self_config.post_hook, &other_config.post_hook);
             let persist_docs_eq =
                 persist_docs_configs_equal(&self_config.persist_docs, &other_config.persist_docs);
-            let grants_eq =
-                btree_map_string_or_array_equal(&self_config.grants, &other_config.grants);
+            let grants_eq = grants_eq(&self_config.grants, &other_config.grants);
             let event_time_eq = self_config.event_time == other_config.event_time;
             let quoting_eq = quoting_equal(&self_config.quoting, &other_config.quoting);
             let static_analysis_eq = self_config.static_analysis == other_config.static_analysis;
@@ -2772,6 +2801,26 @@ where
     }
 }
 
+/// Serialize Option<IndexMap<String, YmlValue>> as empty map when None, otherwise as the map value.
+/// This ensures the field is always present in serialized output, which is required for
+/// Jinja macros that access `node.config.meta.get(...)`.
+pub fn serialize_none_as_empty_map<S>(
+    value: &Option<IndexMap<String, YmlValue>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    match value {
+        Some(map) => map.serialize(serializer),
+        None => {
+            let empty_map = serializer.serialize_map(Some(0))?;
+            empty_map.end()
+        }
+    }
+}
+
 /// Deserialize Option<String>, treating empty string as None for consistency.
 pub fn deserialize_empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -3521,7 +3570,7 @@ impl DbtModel {
 
         let breaking_change_message =
             format!("Breaking Change to Contract for model '{node_name}': {error_message}");
-        emit_error_log_message(ErrorCode::Generic, breaking_change_message, None);
+        emit_error_log_message(ErrorCode::InvalidConfig, breaking_change_message, None);
     }
 
     fn log_unversioned_breaking_change_warning(
@@ -3536,7 +3585,7 @@ impl DbtModel {
             \n  - {breaking_change}\n"
         );
 
-        emit_warn_log_message(ErrorCode::Generic, warning_message, None);
+        emit_warn_log_message(ErrorCode::DependencyWarning, warning_message, None);
     }
 }
 
@@ -4051,6 +4100,99 @@ mod tests {
             panic!("Could not deserialize and failed with the following error: {err}");
         }
     }
+
+    mod optional_string_vecs_equal_tests {
+        use super::super::optional_string_vecs_equal;
+
+        #[test]
+        fn test_empty_vecs_are_equal() {
+            let a: Vec<Option<String>> = vec![];
+            let b: Vec<Option<String>> = vec![];
+            assert!(optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_different_lengths_are_not_equal() {
+            let a = vec![Some("a".to_string())];
+            let b = vec![Some("a".to_string()), Some("b".to_string())];
+            assert!(!optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_none_equals_empty_string() {
+            let a = vec![None];
+            let b = vec![Some("".to_string())];
+            assert!(optional_string_vecs_equal(&a, &b));
+            assert!(optional_string_vecs_equal(&b, &a));
+        }
+
+        #[test]
+        fn test_none_equals_whitespace_only() {
+            let a = vec![None];
+            let b = vec![Some("   ".to_string())];
+            assert!(optional_string_vecs_equal(&a, &b));
+            assert!(optional_string_vecs_equal(&b, &a));
+        }
+
+        #[test]
+        fn test_empty_string_equals_whitespace_only() {
+            let a = vec![Some("".to_string())];
+            let b = vec![Some("   \t\n".to_string())];
+            assert!(optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_non_empty_with_different_whitespace_are_equal() {
+            // normalize_sql removes all whitespace, so these should be equal
+            let a = vec![Some("hello world".to_string())];
+            let b = vec![Some("hello  world".to_string())];
+            assert!(optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_non_empty_different_content_are_not_equal() {
+            let a = vec![Some("foo".to_string())];
+            let b = vec![Some("bar".to_string())];
+            assert!(!optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_empty_vs_non_empty_are_not_equal() {
+            let a = vec![None];
+            let b = vec![Some("content".to_string())];
+            assert!(!optional_string_vecs_equal(&a, &b));
+            assert!(!optional_string_vecs_equal(&b, &a));
+        }
+
+        #[test]
+        fn test_multiple_elements_one_mismatch() {
+            let a = vec![
+                Some("same".to_string()),
+                Some("different1".to_string()),
+                Some("same".to_string()),
+            ];
+            let b = vec![
+                Some("same".to_string()),
+                Some("different2".to_string()),
+                Some("same".to_string()),
+            ];
+            assert!(!optional_string_vecs_equal(&a, &b));
+        }
+
+        #[test]
+        fn test_real_world_column_descriptions() {
+            // Simulates the real issue: duplicate column definitions with different descriptions
+            let current = vec![
+                Some("Primary key".to_string()),
+                Some("The order in which this user was created under the carrier.".to_string()),
+            ];
+            let previous = vec![
+                Some("Primary key".to_string()),
+                Some("The order in which this user was created under the carrier.".to_string()),
+            ];
+            assert!(optional_string_vecs_equal(&current, &previous));
+        }
+    }
 }
 
 #[skip_serializing_none]
@@ -4168,6 +4310,7 @@ impl InternalDbtNodeAttributes for DbtAnalysis {
         dbt_serde_yaml::to_value(&self.deprecated_config).expect("Failed to serialize to YAML")
     }
 }
+// Saved queries don't have a relation, individual exports do.
 pub fn is_invalid_for_relation_comparison(node: &dyn InternalDbtNode) -> bool {
-    node.resource_type() == NodeType::UnitTest
+    node.resource_type() == NodeType::UnitTest || node.resource_type() == NodeType::SavedQuery
 }

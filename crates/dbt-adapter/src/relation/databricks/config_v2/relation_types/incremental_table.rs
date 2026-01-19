@@ -11,13 +11,15 @@ fn requires_full_refresh(components: &IndexMap<&'static str, ComponentConfigChan
 
 /// Create a `RelationConfigLoader` for Databricks incremental tables
 pub(crate) fn new_loader() -> RelationConfigLoader<DatabricksRelationMetadata> {
-    let loaders: [Box<dyn ComponentConfigLoader<DatabricksRelationMetadata>>; 7] = [
+    // TODO: missing from Python dbt-databricks:
+    // - liquid clustering
+    let loaders: [Box<dyn ComponentConfigLoader<DatabricksRelationMetadata>>; 6] = [
         // TODO: column mask
         Box::new(components::ColumnCommentsLoader),
         Box::new(components::ColumnTagsLoader),
-        Box::new(components::ConstraintsLoader),
-        Box::new(components::LiquidClusteringLoader),
         Box::new(components::RelationCommentLoader),
+        Box::new(components::ConstraintsLoader),
+        // Box::new(components::LiquidClusteringLoader),
         Box::new(components::RelationTagsLoader),
         Box::new(components::TblPropertiesLoader),
     ];
@@ -29,23 +31,18 @@ pub(crate) fn new_loader() -> RelationConfigLoader<DatabricksRelationMetadata> {
 mod tests {
     use super::{new_loader, requires_full_refresh};
     use crate::relation::config_v2::{ComponentConfigChange, RelationComponentConfigChangeSet};
-    use crate::relation::databricks as rc_v1;
     use crate::relation::databricks::config_v2::{
-        components,
-        test_helpers::{TestCase, TestModelColumn, TestModelConfig, run_test_cases},
+        DatabricksRelationMetadata, components,
+        test_helpers::{TestModelColumn, TestModelConfig, run_test_cases},
     };
+    use crate::relation::test_helpers::TestCase;
     use dbt_schemas::schemas::common::{Constraint, ConstraintType};
     use indexmap::{IndexMap, IndexSet};
 
-    fn create_test_cases() -> Vec<TestCase<rc_v1::incremental::IncrementalTableConfig>> {
+    fn create_test_cases() -> Vec<TestCase<DatabricksRelationMetadata, TestModelConfig>> {
         vec![TestCase {
             description: "changing any incremental table components should not trigger a full refresh",
-            v1_relation_loader: std::marker::PhantomData,
-            v1_errors: vec![
-                // v1 does not validate overriding databricks-reserved keys in the dbt model
-                "tbl_properties",
-            ],
-            v2_relation_loader: new_loader(),
+            relation_loader: new_loader(),
             current_state: TestModelConfig {
                 persist_relation_comments: true,
                 persist_column_comments: true,
@@ -128,7 +125,7 @@ mod tests {
                         components::ColumnCommentsLoader::type_name(),
                         ComponentConfigChange::Some(components::ColumnCommentsLoader::new(
                             IndexMap::from_iter([(
-                                "a_column".to_string(),
+                                "`a_column`".to_string(),
                                 "new comment".to_string(),
                             )]),
                         )),

@@ -29,6 +29,7 @@ pub enum LocalExecutionBackendKind {
 }
 
 use crate::adapter::AdapterType;
+use crate::constants::DBT_TARGET_DIR_NAME;
 use crate::{
     constants::{DBT_GENERIC_TESTS_DIR_NAME, DBT_SNAPSHOTS_DIR_NAME},
     io_utils::StatusReporter,
@@ -47,24 +48,25 @@ pub enum FsCommand {
     #[default]
     Unset,
     /// Standard dbt commands
-    Build,
-    Clean,
-    Clone,
-    Compile,
-    Debug,
-    Deps,
     Init,
-    List,
-    Man,
+    Deps,
     Parse,
+    List, // aka: Ls
+    Compile,
     Run,
     RunOperation,
-    Seed,
-    Show,
-    Snapshot,
-    Source,
-    System,
     Test,
+    Seed,
+    Snapshot,
+    Show,
+    Build,
+    Clean,
+    Source,
+    Clone,
+    System,
+    Man,
+    Debug,
+    Hydrate,
     /// All other commands provided by private cli's
     Extension(&'static str),
 }
@@ -73,24 +75,25 @@ impl FsCommand {
     pub const fn as_str(&self) -> &'static str {
         match self {
             FsCommand::Unset => "",
-            FsCommand::Build => "build",
-            FsCommand::Clean => "clean",
-            FsCommand::Clone => "clone",
-            FsCommand::Compile => "compile",
-            FsCommand::Debug => "debug",
-            FsCommand::Deps => "deps",
             FsCommand::Init => "init",
-            FsCommand::List => "list",
-            FsCommand::Man => "man",
+            FsCommand::Deps => "deps",
             FsCommand::Parse => "parse",
+            FsCommand::List => "list",
+            FsCommand::Compile => "compile",
             FsCommand::Run => "run",
             FsCommand::RunOperation => "run-operation",
-            FsCommand::Seed => "seed",
-            FsCommand::Show => "show",
-            FsCommand::Snapshot => "snapshot",
-            FsCommand::Source => "freshness",
-            FsCommand::System => "system",
             FsCommand::Test => "test",
+            FsCommand::Seed => "seed",
+            FsCommand::Snapshot => "snapshot",
+            FsCommand::Show => "show",
+            FsCommand::Build => "build",
+            FsCommand::Clean => "clean",
+            FsCommand::Source => "freshness",
+            FsCommand::Clone => "clone",
+            FsCommand::System => "system",
+            FsCommand::Man => "man",
+            FsCommand::Debug => "debug",
+            FsCommand::Hydrate => "hydrate",
             FsCommand::Extension(s) => s,
         }
     }
@@ -172,7 +175,7 @@ impl IoArgs {
             return relative_path.to_string_lossy().to_string();
         }
         if path.is_relative() {
-            let target_path = in_dir.join("target").join(path);
+            let target_path = in_dir.join(DBT_TARGET_DIR_NAME).join(path);
             if target_path.exists() {
                 return format!("target/{}", path.to_string_lossy());
             }
@@ -335,7 +338,7 @@ pub struct EvalArgs {
     pub warn_error: bool,
     pub warn_error_options: BTreeMap<String, Value>,
     pub version_check: bool,
-    pub defer: Option<bool>,
+    pub defer: bool,
     pub fail_fast: bool,
     pub empty: bool,
     pub sample: Option<String>,

@@ -1,3 +1,4 @@
+use crate::schemas::serde::OmissibleGrantConfig;
 use dbt_common::io_args::StaticAnalysisKind;
 use dbt_common::serde_utils::Omissible;
 use dbt_serde_yaml::JsonSchema;
@@ -28,7 +29,7 @@ use crate::schemas::project::dbt_project::DefaultTo;
 use crate::schemas::project::dbt_project::TypedRecursiveConfig;
 use crate::schemas::properties::{FunctionKind, Volatility};
 use crate::schemas::serde::StringOrArrayOfStrings;
-use crate::schemas::serde::{bool_or_string_bool, default_type, serialize_string_or_array_map};
+use crate::schemas::serde::{bool_or_string_bool, default_type};
 
 #[skip_serializing_none]
 #[derive(Deserialize, Serialize, Debug, Clone, JsonSchema)]
@@ -45,8 +46,8 @@ pub struct ProjectFunctionConfig {
     pub docs: Option<DocsConfig>,
     #[serde(default, rename = "+enabled", deserialize_with = "bool_or_string_bool")]
     pub enabled: Option<bool>,
-    #[serde(rename = "+grants", serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(rename = "+grants")]
+    pub grants: OmissibleGrantConfig,
     #[serde(rename = "+group")]
     pub group: Option<String>,
     #[serde(rename = "+language")]
@@ -67,6 +68,10 @@ pub struct ProjectFunctionConfig {
     pub function_kind: Option<FunctionKind>,
     #[serde(rename = "+volatility")]
     pub volatility: Option<Volatility>,
+    #[serde(rename = "+runtime_version")]
+    pub runtime_version: Option<String>,
+    #[serde(rename = "+entry_point")]
+    pub entry_point: Option<String>,
 
     // Additional properties for directory structure
     pub __additional_properties__: BTreeMap<String, ShouldBe<ProjectFunctionConfig>>,
@@ -81,7 +86,7 @@ impl Default for ProjectFunctionConfig {
             description: None,
             docs: None,
             enabled: None,
-            grants: None,
+            grants: OmissibleGrantConfig::default(),
             group: None,
             language: None,
             meta: None,
@@ -92,6 +97,8 @@ impl Default for ProjectFunctionConfig {
             tags: None,
             function_kind: None,
             volatility: None,
+            runtime_version: None,
+            entry_point: None,
             __additional_properties__: BTreeMap::new(),
         }
     }
@@ -117,6 +124,8 @@ impl DefaultTo<ProjectFunctionConfig> for ProjectFunctionConfig {
             tags,
             function_kind,
             volatility,
+            runtime_version,
+            entry_point,
             __additional_properties__: _,
         } = self;
 
@@ -141,6 +150,8 @@ impl DefaultTo<ProjectFunctionConfig> for ProjectFunctionConfig {
                 static_analysis,
                 function_kind,
                 volatility,
+                runtime_version,
+                entry_point,
             ]
         );
     }
@@ -172,8 +183,7 @@ pub struct FunctionConfig {
     pub meta: Option<IndexMap<String, YmlValue>>,
     pub group: Option<String>,
     pub docs: Option<DocsConfig>,
-    #[serde(serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    pub grants: OmissibleGrantConfig,
     pub quoting: Option<DbtQuoting>,
     pub language: Option<String>,
     pub on_configuration_change: Option<String>,
@@ -181,6 +191,8 @@ pub struct FunctionConfig {
     #[serde(rename = "type")]
     pub function_kind: Option<FunctionKind>,
     pub volatility: Option<Volatility>,
+    pub runtime_version: Option<String>,
+    pub entry_point: Option<String>,
 
     // Warehouse-specific configurations
     pub __warehouse_specific_config__: WarehouseSpecificNodeConfig,
@@ -221,6 +233,8 @@ impl DefaultTo<FunctionConfig> for FunctionConfig {
             static_analysis,
             function_kind,
             volatility,
+            runtime_version,
+            entry_point,
             __warehouse_specific_config__: warehouse_config,
         } = self;
 
@@ -230,6 +244,9 @@ impl DefaultTo<FunctionConfig> for FunctionConfig {
         // Handle omissible database and schema fields separately
         handle_omissible_override(database, &parent.database);
         handle_omissible_override(schema, &parent.schema);
+
+        // Handle grants with custom merge logic
+        default_to_grants(grants, &parent.grants);
 
         default_to!(
             parent,
@@ -241,13 +258,14 @@ impl DefaultTo<FunctionConfig> for FunctionConfig {
                 meta,
                 group,
                 docs,
-                grants,
                 quoting,
                 language,
                 on_configuration_change,
                 static_analysis,
                 function_kind,
                 volatility,
+                runtime_version,
+                entry_point,
             ]
         );
     }
@@ -272,6 +290,8 @@ impl From<ProjectFunctionConfig> for FunctionConfig {
             static_analysis: config.static_analysis,
             function_kind: config.function_kind,
             volatility: config.volatility,
+            runtime_version: config.runtime_version,
+            entry_point: config.entry_point,
             __warehouse_specific_config__: WarehouseSpecificNodeConfig::default(),
         }
     }

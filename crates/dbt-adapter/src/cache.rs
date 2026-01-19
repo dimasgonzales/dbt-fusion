@@ -54,15 +54,25 @@ struct SchemaEntry {
 /// use std::sync::Arc;
 /// use dbt_schemas::schemas::relations::base::BaseRelation;
 /// use dbt_adapter::cache::{RelationCache, RelationCacheEntry};
+/// use dbt_adapter::relation::create_relation;
+/// use dbt_common::adapter::AdapterType;
+/// use dbt_schemas::schemas::relations::DEFAULT_RESOLVED_QUOTING;
 ///
-/// let cache = RelationCache::new();
-/// let relation: Arc<dyn BaseRelation> = // ... some relation
+/// let cache = RelationCache::default();
+/// let relation = create_relation(
+///    AdapterType::Postgres,
+///    "db".to_string(),
+///    "schema".to_string(),
+///    Some("table".to_string()),
+///    None,
+///    DEFAULT_RESOLVED_QUOTING
+/// ).unwrap();
 ///
 /// // Insert relation into cache
-/// cache.insert_relation(relation.clone());
+/// cache.insert_relation(relation.clone(), None);
 ///
 /// // Retrieve cached relation
-/// let cached: Option<RelationCacheEntry> = cache.get_relation(relation);
+/// let cached: Option<RelationCacheEntry> = cache.get_relation(&relation);
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct RelationCache {
@@ -245,12 +255,12 @@ mod tests {
 
     #[test]
     fn test_different_key_creation() {
-        use crate::relation::create_relation;
+        use crate::relation::do_create_relation;
 
         let cache = RelationCache::default();
 
         // Create relations with different combinations of database, schema, identifier
-        let relation1 = create_relation(
+        let relation1 = do_create_relation(
             AdapterType::Postgres,
             "db1".to_string(),
             "schema1".to_string(),
@@ -260,7 +270,7 @@ mod tests {
         )
         .unwrap();
 
-        let relation2 = create_relation(
+        let relation2 = do_create_relation(
             AdapterType::Postgres,
             "db2".to_string(),
             "schema1".to_string(),
@@ -270,7 +280,7 @@ mod tests {
         )
         .unwrap();
 
-        let relation3 = create_relation(
+        let relation3 = do_create_relation(
             AdapterType::Postgres,
             "db1".to_string(),
             "schema2".to_string(),
@@ -280,7 +290,7 @@ mod tests {
         )
         .unwrap();
 
-        let relation4 = create_relation(
+        let relation4 = do_create_relation(
             AdapterType::Postgres,
             "db1".to_string(),
             "schema1".to_string(),
@@ -290,7 +300,7 @@ mod tests {
         )
         .unwrap();
 
-        let relation1_dup = create_relation(
+        let relation1_dup = do_create_relation(
             AdapterType::Postgres,
             "db1".to_string(),
             "schema1".to_string(),
@@ -334,12 +344,12 @@ mod tests {
 
     #[test]
     fn test_quoting_policy_affects_cache_keys() {
-        use crate::relation::create_relation;
+        use crate::relation::do_create_relation;
 
         let cache = RelationCache::default();
 
         // With DEFAULT_RESOLVED_QUOTING
-        let relation_quoted = create_relation(
+        let relation_quoted = do_create_relation(
             AdapterType::Postgres,
             "MyDB".to_string(),
             "MySchema".to_string(),
@@ -350,7 +360,7 @@ mod tests {
         .unwrap();
 
         // With no quoting
-        let relation_unquoted = create_relation(
+        let relation_unquoted = do_create_relation(
             AdapterType::Postgres,
             "MyDB".to_string(),
             "MySchema".to_string(),
@@ -380,7 +390,7 @@ mod tests {
         assert!(cache.contains_relation(&relation_unquoted));
 
         // Test that we find the unquoted relation when searching with unquoted policy
-        let search_relation_unquoted = create_relation(
+        let search_relation_unquoted = do_create_relation(
             AdapterType::Postgres,
             "MyDB".to_string(),
             "MySchema".to_string(),
@@ -401,7 +411,7 @@ mod tests {
     #[test]
     fn test_concurrent_mixed_operations_no_race_condition() {
         use crate::metadata::CatalogAndSchema;
-        use crate::relation::create_relation;
+        use crate::relation::do_create_relation;
         use std::sync::Arc;
         use std::thread;
 
@@ -413,7 +423,7 @@ mod tests {
             .flat_map(|i| {
                 // Create relations in 3 different schemas
                 (0..3).map(move |schema_id| {
-                    create_relation(
+                    do_create_relation(
                         AdapterType::Postgres,
                         "test_db".to_string(),
                         format!("schema_{schema_id}"),
@@ -473,7 +483,7 @@ mod tests {
                             }
                             6 => {
                                 // Rename operations (less common but important)
-                                let new_relation = create_relation(
+                                let new_relation = do_create_relation(
                                     AdapterType::Postgres,
                                     "test_db".to_string(),
                                     format!("schema_{}", thread_id % 3),

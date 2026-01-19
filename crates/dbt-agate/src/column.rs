@@ -5,7 +5,7 @@ use core::fmt;
 use minijinja::arg_utils::ArgsIter;
 use minijinja::listener::RenderingEventListener;
 use minijinja::value::{Enumerator, Object, ObjectRepr};
-use minijinja::{Error as MinijinjaError, State, Value, assert_nullary_args};
+use minijinja::{State, Value, assert_nullary_args};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -105,7 +105,7 @@ impl Column {
         ColumnAsTuple::from_single_column_table(table)
     }
 
-    pub fn data_type(&self) -> Option<&String> {
+    pub fn data_type(&self) -> Option<&crate::DataType> {
         self.of_table.column_type(self.index as isize)
     }
 
@@ -152,7 +152,7 @@ impl Object for Column {
                     .of_table
                     .column_name(self.index as isize)
                     .map(Value::from),
-                "data_type" => self.data_type().map(Value::from),
+                "data_type" => self.data_type().map(|dt| Value::from_object(dt.clone())),
                 _ => MappedSequence::get_value(self, key),
             }
         } else {
@@ -170,7 +170,7 @@ impl Object for Column {
         method: &str,
         args: &[Value],
         listeners: &[Rc<dyn RenderingEventListener>],
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         match method {
             // Column methods
             "values_distinct" => {

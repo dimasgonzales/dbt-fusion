@@ -1100,7 +1100,7 @@ impl Object for Exceptions {
                 let warn_string = args.get::<String>("").unwrap_or_else(|_| "".to_string());
 
                 emit_warn_log_message(
-                    ErrorCode::Generic,
+                    ErrorCode::DependencyWarning,
                     warn_string,
                     self.io_args.status_reporter.as_ref(),
                 );
@@ -1286,7 +1286,7 @@ impl Object for Exceptions {
                 );
 
                 emit_warn_log_message(
-                    ErrorCode::Generic,
+                    ErrorCode::InvalidConfig,
                     warning,
                     self.io_args.status_reporter.as_ref(),
                 );
@@ -1359,19 +1359,6 @@ pub fn build_flat_graph(nodes: &Nodes) -> MutableMap {
                     map.insert(
                         YmlValue::string("path".to_string()),
                         YmlValue::string(file_name.to_string_lossy().to_string()),
-                    );
-                }
-                // For singular tests (from SQL files), update unique_id to remove the hash suffix
-                // For generic tests (from YAML files), keep the original unique_id with suffix
-                if test.__test_attr__.test_metadata.is_none() {
-                    // Singular test - remove hash suffix
-                    let unique_id_without_hash = format!(
-                        "test.{}.{}",
-                        test.__common_attr__.package_name, test.__common_attr__.name
-                    );
-                    map.insert(
-                        YmlValue::string("unique_id".to_string()),
-                        YmlValue::string(unique_id_without_hash),
                     );
                 }
                 // Set severity to ERROR in config if not already set

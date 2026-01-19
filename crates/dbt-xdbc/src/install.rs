@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{env, io};
 
+use crate::*;
 use adbc_core::error::{Error, Status};
 use percent_encoding::AsciiSet;
 use sha2::{Digest, Sha256};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-
-use crate::*;
 
 static INSTALLABLE_DRIVERS: &[Backend; 7] = &[
     Backend::Snowflake,
@@ -20,6 +19,8 @@ static INSTALLABLE_DRIVERS: &[Backend; 7] = &[
     Backend::Redshift,
     Backend::DuckDB,
     Backend::Salesforce,
+    // TODO(serramatutu): work in progress
+    // Backend::Spark,
 ];
 
 #[derive(Debug)]
@@ -250,6 +251,14 @@ pub fn pre_install_all_drivers() -> Result<()> {
 }
 
 pub fn is_installable_driver(backend: Backend) -> bool {
+    // NOTE(serramatutu): Allow us to debug drivers locally without needing them to be installable via CDN.
+    #[cfg(debug_assertions)]
+    {
+        if env_var::env_var_bool("DISABLE_CDN_DRIVER_CACHE").unwrap_or(false) {
+            return true;
+        }
+    }
+
     INSTALLABLE_DRIVERS.contains(&backend)
 }
 
@@ -281,6 +290,7 @@ pub fn driver_parameters(
         Backend::Postgres => ("postgresql", POSTGRES_DRIVER_VERSION),
         Backend::Databricks => ("databricks", DATABRICKS_DRIVER_VERSION),
         Backend::Redshift => ("redshift", REDSHIFT_DRIVER_VERSION),
+        Backend::Spark => ("spark", SPARK_DRIVER_VERSION),
         Backend::Salesforce => ("salesforce", SALESFORCE_DRIVER_VERSION),
         Backend::DuckDB => ("duckdb", DUCKDB_DRIVER_VERSION),
         Backend::DatabricksODBC | Backend::RedshiftODBC | Backend::Generic { .. } => {
@@ -631,6 +641,8 @@ mod tests {
             ("redshift", REDSHIFT_DRIVER_VERSION),
             ("duckdb", DUCKDB_DRIVER_VERSION),
             ("salesforce", SALESFORCE_DRIVER_VERSION),
+            // TODO: spark
+            // ("spark", SPARK_DRIVER_VERSION),
         ];
         debug_assert!(
             backend_and_versions.len() == INSTALLABLE_DRIVERS.len(),

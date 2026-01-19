@@ -1,5 +1,6 @@
 use chrono_tz::Tz;
 use dbt_serde_yaml::{Spanned, UntaggedEnumDeserialize};
+use indexmap::IndexMap;
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -25,10 +26,7 @@ use crate::schemas::{
 };
 use blake3::Hasher;
 use chrono::{DateTime, Local, Utc};
-use dbt_common::{
-    ErrorCode, FsResult, adapter::AdapterType, fs_err, io_args::FsCommand,
-    serde_utils::convert_yml_to_map,
-};
+use dbt_common::{ErrorCode, FsResult, adapter::AdapterType, fs_err, io_args::FsCommand};
 use minijinja::{MacroSpans, Value as MinijinjaValue, value::Object};
 use serde::Deserialize;
 use serde::Serialize;
@@ -75,6 +73,9 @@ pub struct DbtAsset {
     // in_dir (or project_dir), if the asset is input,
     // out_dir (or target_dir), if asset is an output
     pub base_path: PathBuf,
+    // original location that generated this asset; used to generate
+    // the fqn based on original location to preserve config hierarchy
+    pub original_path: PathBuf,
     // relative path to project root
     pub path: PathBuf,
     // package name
@@ -111,7 +112,6 @@ impl fmt::Display for DbtAsset {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenericTestAsset {
     pub dbt_asset: DbtAsset,
-    pub original_file_path: PathBuf,
     pub resource_name: String,
     pub resource_type: String,
     pub test_name: String,
@@ -129,9 +129,8 @@ impl fmt::Display for GenericTestAsset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "GenericTestAsset {{ dbt_asset: {}, original_file_path: {}, resource_name: {}, resource_type: {}, test_name: {}, test_metadata_name: {:?} }}",
+            "GenericTestAsset {{ dbt_asset: {}, resource_name: {}, resource_type: {}, test_name: {}, test_metadata_name: {:?} }}",
             self.dbt_asset,
-            self.original_file_path.display(),
             self.resource_name,
             self.resource_type,
             self.test_name,
@@ -211,7 +210,7 @@ pub struct DbtState {
     pub run_started_at: DateTime<Tz>,
     pub packages: Vec<DbtPackage>,
     /// Key is the package name, value are all package scoped vars
-    pub vars: BTreeMap<String, BTreeMap<String, DbtVars>>,
+    pub vars: BTreeMap<String, IndexMap<String, DbtVars>>,
     pub cli_vars: BTreeMap<String, dbt_serde_yaml::Value>,
     pub catalogs: Option<Arc<DbtCatalogs>>,
 }
@@ -372,7 +371,7 @@ impl NodeResolverTracker for DummyNodeResolverTracker {
         _node_package_name: &Option<String>,
     ) -> FsResult<(String, MinijinjaValue, ModelStatus, Option<MinijinjaValue>)> {
         Err(fs_err!(
-            ErrorCode::Generic,
+            ErrorCode::NotImplemented,
             "DummyNodeResolverTracker: lookup_ref not implemented for '{}'",
             name
         ))
@@ -385,7 +384,7 @@ impl NodeResolverTracker for DummyNodeResolverTracker {
         table_name: &str,
     ) -> FsResult<(String, MinijinjaValue, ModelStatus)> {
         Err(fs_err!(
-            ErrorCode::Generic,
+            ErrorCode::NotImplemented,
             "DummyNodeResolverTracker: lookup_source not implemented for '{}.{}'",
             source_name,
             table_name
@@ -399,7 +398,7 @@ impl NodeResolverTracker for DummyNodeResolverTracker {
         _maybe_node_package_name: &Option<String>,
     ) -> FsResult<(String, MinijinjaValue, ModelStatus)> {
         Err(fs_err!(
-            ErrorCode::Generic,
+            ErrorCode::NotImplemented,
             "DummyNodeResolverTracker: lookup_function not implemented for '{}'",
             function_name
         ))
@@ -412,7 +411,7 @@ impl NodeResolverTracker for DummyNodeResolverTracker {
         _is_frontier: bool,
     ) -> FsResult<()> {
         Err(fs_err!(
-            ErrorCode::Generic,
+            ErrorCode::NotImplemented,
             "DummyNodeResolverTracker: update_ref_with_deferral not implemented"
         ))
     }
@@ -704,7 +703,7 @@ pub struct DbtRuntimeConfigInner {
     pub query_comment: Option<QueryComment>,
 
     // Variables and hooks
-    pub vars: BTreeMap<String, DbtVars>,
+    pub vars: IndexMap<String, DbtVars>,
     pub cli_vars: BTreeMap<String, dbt_serde_yaml::Value>,
     pub on_run_start: Vec<Spanned<String>>,
     pub on_run_end: Vec<Spanned<String>>,
@@ -736,7 +735,7 @@ impl DbtRuntimeConfig {
         package: &DbtPackage,
         profile: &DbtProfile,
         dependency_lookup: &BTreeMap<String, Arc<DbtRuntimeConfig>>,
-        vars: &BTreeMap<String, DbtVars>,
+        vars: &IndexMap<String, DbtVars>,
         cli_vars: &BTreeMap<String, dbt_serde_yaml::Value>,
     ) -> Self {
         let runtime_config_inner = DbtRuntimeConfigInner {
@@ -824,13 +823,17 @@ impl DbtRuntimeConfig {
 
         // TODO(anna): Look into whether this should also be Index map
         let mut runtime_config = Self {
-            runtime_config: BTreeMap::from_iter(convert_yml_to_map(
+            runtime_config: Deserialize::deserialize(
                 dbt_serde_yaml::to_value(&runtime_config_inner).unwrap(),
-            )),
+            )
+            .unwrap(),
             dependencies: BTreeMap::new(),
-            vars: minijinja::Value::from_object(VarProvider::new(BTreeMap::from_iter(
-                convert_yml_to_map(dbt_serde_yaml::to_value(&runtime_config_inner.vars).unwrap()),
-            ))),
+            vars: minijinja::Value::from_object(VarProvider::new(
+                Deserialize::deserialize(
+                    dbt_serde_yaml::to_value(&runtime_config_inner.vars).unwrap(),
+                )
+                .unwrap(),
+            )),
             inner: runtime_config_inner,
         };
 

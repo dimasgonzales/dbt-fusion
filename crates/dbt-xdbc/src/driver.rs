@@ -22,14 +22,11 @@ use std::{
     path::PathBuf, sync::LazyLock,
 };
 
+#[cfg(debug_assertions)]
+use {crate::env_var::env_var_bool, std::io::ErrorKind, std::process::Command};
+
 mod builder;
 pub use builder::*;
-
-#[cfg(debug_assertions)]
-mod env_var;
-
-#[cfg(debug_assertions)]
-use {env_var::env_var_bool, std::io::ErrorKind, std::process::Command};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Backend {
@@ -45,6 +42,8 @@ pub enum Backend {
     Redshift,
     /// Salesforce driver implementation (ADBC).
     Salesforce,
+    /// Spark driver implementation (ADBC).
+    Spark,
     /// DuckDB driver implementation (ADBC).
     DuckDB,
     /// Databricks driver implementation (ODBC).
@@ -79,6 +78,7 @@ impl Display for Backend {
             Backend::DatabricksODBC => write!(f, "Databricks"),
             Backend::RedshiftODBC => write!(f, "Redshift"),
             Backend::Salesforce => write!(f, "Salesforce"),
+            Backend::Spark => write!(f, "Spark"),
             Backend::Generic { library_name, .. } => write!(f, "Generic({library_name})"),
         }
     }
@@ -92,6 +92,7 @@ impl Backend {
             Backend::Postgres => Some("adbc_driver_postgresql"),
             Backend::Databricks => Some("adbc_driver_databricks"),
             Backend::Salesforce => Some("adbc_driver_salesforce"),
+            Backend::Spark => Some("adbc_driver_spark"),
             Backend::Redshift => Some("adbc_driver_redshift"),
             Backend::DuckDB => Some("duckdb"),
             Backend::DatabricksODBC | Backend::RedshiftODBC => None, // these use ODBC
@@ -119,6 +120,7 @@ impl Backend {
             | Backend::Databricks
             | Backend::Redshift
             | Backend::Salesforce
+            | Backend::Spark
             | Backend::DuckDB
             | Backend::Generic { .. } => FFIProtocol::Adbc,
             Backend::DatabricksODBC | Backend::RedshiftODBC => FFIProtocol::Odbc,
@@ -234,15 +236,24 @@ fn find_adbc_libs_directory() -> Option<PathBuf> {
 
     #[cfg(debug_assertions)]
     {
-        let arrow_adbc_pkg_rel_path: PathBuf = ["arrow-adbc", "go", "adbc", "pkg"].iter().collect();
+        let adbc_libs_path = env::var("ADBC_REPOSITORY")
+            .ok()
+            .map(|repo_str| repo_str.into())
+            // fall back to `../arrow-adbc/` if ADBC repository is not provided
+            .or_else(|| {
+                let arrow_adbc_pkg_rel_path: PathBuf =
+                    ["arrow-adbc", "go", "adbc", "pkg"].iter().collect();
 
-        if let Some(sibling_arrow_adbc) =
-            find_upward_dir(&starting_dir, &arrow_adbc_pkg_rel_path, ARROW_HEIGHT_MAX)
-        {
-            if !env_var_bool("DISABLE_AUTO_DRIVER_REBUILD").ok()? {
-                rebuild_drivers(&sibling_arrow_adbc).unwrap();
-            }
-            return Some(sibling_arrow_adbc);
+                find_upward_dir(&starting_dir, &arrow_adbc_pkg_rel_path, ARROW_HEIGHT_MAX)
+            })
+            .inspect(|arrow_repo| {
+                if !env_var_bool("DISABLE_AUTO_DRIVER_REBUILD").unwrap() {
+                    rebuild_drivers(arrow_repo).unwrap();
+                }
+            });
+
+        if adbc_libs_path.is_some() {
+            return adbc_libs_path;
         }
     }
 
@@ -318,6 +329,7 @@ impl AdbcDriver {
             | Backend::Postgres
             | Backend::Databricks
             | Backend::Redshift
+            | Backend::Spark
             | Backend::DuckDB
             | Backend::Salesforce => {
                 debug_assert!(backend.ffi_protocol() == FFIProtocol::Adbc);
@@ -510,6 +522,7 @@ mod tests {
         try_load_with_builder(Backend::Databricks, AdbcVersion::V100)?;
         try_load_with_builder(Backend::DuckDB, AdbcVersion::V100)?;
         try_load_with_builder(Backend::Salesforce, AdbcVersion::V100)?;
+        try_load_with_builder(Backend::Spark, AdbcVersion::V100)?;
         Ok(())
     }
 
@@ -522,6 +535,7 @@ mod tests {
         try_load_with_builder(Backend::Databricks, AdbcVersion::V110)?;
         try_load_with_builder(Backend::DuckDB, AdbcVersion::V110)?;
         try_load_with_builder(Backend::Salesforce, AdbcVersion::V110)?;
+        try_load_with_builder(Backend::Spark, AdbcVersion::V110)?;
         Ok(())
     }
 
@@ -535,6 +549,7 @@ mod tests {
             Backend::Databricks,
             Backend::DuckDB,
             Backend::Salesforce,
+            Backend::Spark,
         ]
         .iter()
         .copied()

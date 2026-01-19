@@ -1,3 +1,4 @@
+use crate::schemas::serde::OmissibleGrantConfig;
 use dbt_common::io_args::StaticAnalysisKind;
 use dbt_common::serde_utils::Omissible;
 use dbt_serde_yaml::JsonSchema;
@@ -25,7 +26,6 @@ use crate::schemas::common::{Access, DbtQuoting, Schedule};
 use crate::schemas::common::{DocsConfig, OnConfigurationChange};
 use crate::schemas::common::{Hooks, OnSchemaChange, hooks_equal};
 use crate::schemas::manifest::GrantAccessToTarget;
-use crate::schemas::manifest::postgres::PostgresIndex;
 use crate::schemas::manifest::{BigqueryClusterConfig, PartitionConfig};
 use crate::schemas::project::configs::common::default_column_types;
 use crate::schemas::project::configs::common::default_hooks;
@@ -41,7 +41,7 @@ use crate::schemas::project::dbt_project::TypedRecursiveConfig;
 use crate::schemas::properties::ModelFreshness;
 use crate::schemas::serde::StringOrArrayOfStrings;
 use crate::schemas::serde::{
-    bool_or_string_bool, default_type, f64_or_string_f64, serialize_string_or_array_map,
+    IndexesConfig, PrimaryKeyConfig, bool_or_string_bool, default_type, f64_or_string_f64,
     u64_or_string_u64,
 };
 use dbt_serde_yaml::ShouldBe;
@@ -123,6 +123,10 @@ pub struct ProjectModelConfig {
     pub submission_method: Option<String>,
     #[serde(rename = "+job_cluster_config")]
     pub job_cluster_config: Option<BTreeMap<String, YmlValue>>,
+    #[serde(rename = "+cluster_id")]
+    pub cluster_id: Option<String>,
+    #[serde(rename = "+http_path")]
+    pub http_path: Option<String>,
     #[serde(
         default,
         rename = "+create_notebook",
@@ -171,8 +175,8 @@ pub struct ProjectModelConfig {
     pub full_refresh: Option<bool>,
     #[serde(rename = "+grant_access_to")]
     pub grant_access_to: Option<Vec<GrantAccessToTarget>>,
-    #[serde(rename = "+grants", serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    #[serde(rename = "+grants")]
+    pub grants: OmissibleGrantConfig,
     #[serde(rename = "+group")]
     pub group: Option<String>,
     #[serde(
@@ -364,15 +368,15 @@ pub struct ProjectModelConfig {
     pub table_type: Option<String>,
 
     #[serde(default, rename = "+indexes")]
-    pub indexes: Option<Vec<PostgresIndex>>,
+    pub indexes: IndexesConfig,
 
     // Schedule (Databricks streaming tables)
     #[serde(rename = "+schedule")]
     pub schedule: Option<Schedule>,
 
     // Primary Key (Salesforce)
-    #[serde(rename = "+primary_key")]
-    pub primary_key: Option<String>,
+    #[serde(default, rename = "+primary_key")]
+    pub primary_key: PrimaryKeyConfig,
     #[serde(rename = "+category")]
     pub category: Option<DataLakeObjectCategory>,
     // Flattened field:
@@ -413,7 +417,13 @@ pub struct ModelConfig {
     pub tags: Option<StringOrArrayOfStrings>,
     pub catalog_name: Option<String>,
     // need default to ensure None if field is not set
-    #[serde(default, deserialize_with = "default_type")]
+    // serialize_with ensures meta is always present (as {} when None) for Jinja macros
+    // that access node.config.meta.get(...)
+    #[serde(
+        default,
+        deserialize_with = "default_type",
+        serialize_with = "crate::schemas::nodes::serialize_none_as_empty_map"
+    )]
     pub meta: Option<IndexMap<String, YmlValue>>,
     pub group: Option<String>,
     pub materialized: Option<DbtMaterialization>,
@@ -432,8 +442,7 @@ pub struct ModelConfig {
     pub unique_key: Option<DbtUniqueKey>,
     pub on_schema_change: Option<OnSchemaChange>,
     pub on_configuration_change: Option<OnConfigurationChange>,
-    #[serde(serialize_with = "serialize_string_or_array_map")]
-    pub grants: Option<BTreeMap<String, StringOrArrayOfStrings>>,
+    pub grants: OmissibleGrantConfig,
     pub packages: Option<StringOrArrayOfStrings>,
     pub python_version: Option<String>,
     pub docs: Option<DocsConfig>,
@@ -459,6 +468,8 @@ pub struct ModelConfig {
     pub __warehouse_specific_config__: WarehouseSpecificNodeConfig,
     pub submission_method: Option<String>,
     pub job_cluster_config: Option<BTreeMap<String, YmlValue>>,
+    pub cluster_id: Option<String>,
+    pub http_path: Option<String>,
     pub create_notebook: Option<bool>,
     pub index_url: Option<String>,
     pub additional_libs: Option<Vec<YmlValue>>,
@@ -474,6 +485,8 @@ impl From<ProjectModelConfig> for ModelConfig {
             begin: config.begin,
             submission_method: config.submission_method.clone(),
             job_cluster_config: config.job_cluster_config.clone(),
+            cluster_id: config.cluster_id.clone(),
+            http_path: config.http_path.clone(),
             create_notebook: config.create_notebook,
             index_url: config.index_url.clone(),
             additional_libs: config.additional_libs.clone(),
@@ -631,6 +644,8 @@ impl From<ModelConfig> for ProjectModelConfig {
             meta: Verbatim::from(config.meta),
             submission_method: config.submission_method.clone(),
             job_cluster_config: config.job_cluster_config.clone(),
+            cluster_id: config.cluster_id.clone(),
+            http_path: config.http_path.clone(),
             create_notebook: config.create_notebook,
             index_url: config.index_url.clone(),
             additional_libs: config.additional_libs.clone(),
@@ -798,6 +813,8 @@ impl DefaultTo<ModelConfig> for ModelConfig {
             custom_checks,
             submission_method,
             job_cluster_config,
+            cluster_id,
+            http_path,
             create_notebook,
             index_url,
             additional_libs,
@@ -867,6 +884,8 @@ impl DefaultTo<ModelConfig> for ModelConfig {
                 custom_checks,
                 submission_method,
                 job_cluster_config,
+                cluster_id,
+                http_path,
                 create_notebook,
                 index_url,
                 additional_libs,

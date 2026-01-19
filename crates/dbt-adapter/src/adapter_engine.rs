@@ -1,6 +1,7 @@
 use crate::AdapterResponse;
 use crate::auth::Auth;
 use crate::base_adapter::backend_of;
+use crate::cache::RelationCache;
 use crate::config::AdapterConfig;
 use crate::errors::{
     AdapterError, AdapterErrorKind, AdapterResult, adbc_error_to_adapter_error,
@@ -107,6 +108,8 @@ pub struct XdbcEngine {
     pub type_ops: Box<dyn TypeOps>,
     /// Query cache
     query_cache: Option<Arc<dyn QueryCache>>,
+    /// Relation cache - caches warehouse relation metadata to avoid repeated queries
+    relation_cache: Arc<RelationCache>,
     /// Global CLI cancellation token
     cancellation_token: CancellationToken,
 }
@@ -122,6 +125,7 @@ impl XdbcEngine {
         query_comment: QueryCommentConfig,
         type_ops: Box<dyn TypeOps>,
         query_cache: Option<Arc<dyn QueryCache>>,
+        relation_cache: Arc<RelationCache>,
         token: CancellationToken,
     ) -> Self {
         let threads = config
@@ -152,10 +156,12 @@ impl XdbcEngine {
             type_ops,
             query_comment,
             query_cache,
+            relation_cache,
             cancellation_token: token,
         }
     }
 
+    #[inline]
     fn adapter_type(&self) -> AdapterType {
         self.adapter_type
     }
@@ -257,6 +263,8 @@ pub struct MockEngine {
     adapter_type: AdapterType,
     type_ops: Arc<dyn TypeOps>,
     quoting: ResolvedQuoting,
+    /// Relation cache - caches warehouse relation metadata
+    relation_cache: Arc<RelationCache>,
 }
 
 impl MockEngine {
@@ -264,11 +272,56 @@ impl MockEngine {
         adapter_type: AdapterType,
         type_ops: Box<dyn TypeOps>,
         quoting: ResolvedQuoting,
+        relation_cache: Arc<RelationCache>,
     ) -> Self {
         Self {
             adapter_type,
             type_ops: Arc::from(type_ops),
             quoting,
+            relation_cache,
+        }
+    }
+}
+
+/// Sidecar engine for subprocess-based execution.
+///
+/// Routes execution to dbt-db-runner (or similar) via SidecarClient trait.
+/// Implementation details (subprocess management, message protocol) remain
+/// in closed-source crates.
+#[derive(Clone)]
+pub struct SidecarEngine {
+    adapter_type: AdapterType,
+    execution_backend: Backend,
+    client: Arc<dyn crate::sidecar_client::SidecarClient>,
+    quoting: ResolvedQuoting,
+    config: Arc<AdapterConfig>,
+    type_ops: Arc<dyn TypeOps>,
+    query_comment: Arc<QueryCommentConfig>,
+    /// Unused for sidecar adapters - required for API compatibility with AdapterEngine::relation_cache()
+    relation_cache: Arc<RelationCache>,
+}
+
+impl SidecarEngine {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        adapter_type: AdapterType,
+        execution_backend: Backend,
+        client: Arc<dyn crate::sidecar_client::SidecarClient>,
+        quoting: ResolvedQuoting,
+        config: AdapterConfig,
+        type_ops: Box<dyn TypeOps>,
+        query_comment: QueryCommentConfig,
+        relation_cache: Arc<RelationCache>,
+    ) -> Self {
+        Self {
+            adapter_type,
+            execution_backend,
+            client,
+            quoting,
+            config: Arc::new(config),
+            type_ops: Arc::from(type_ops),
+            query_comment: Arc::new(query_comment),
+            relation_cache,
         }
     }
 }
@@ -285,6 +338,8 @@ pub enum AdapterEngine {
     Replay(ReplayEngine),
     /// Mock engine for the MockAdapter
     Mock(MockEngine),
+    /// Sidecar engine for subprocess execution (Snowflake-on-DuckDB, etc.)
+    Sidecar(Arc<SidecarEngine>),
 }
 
 impl AdapterEngine {
@@ -299,6 +354,7 @@ impl AdapterEngine {
         query_cache: Option<Arc<dyn QueryCache>>,
         query_comment: QueryCommentConfig,
         type_ops: Box<dyn TypeOps>,
+        relation_cache: Arc<RelationCache>,
         token: CancellationToken,
     ) -> Arc<Self> {
         let engine = XdbcEngine::new(
@@ -310,6 +366,7 @@ impl AdapterEngine {
             query_comment,
             type_ops,
             query_cache,
+            relation_cache,
             token,
         );
         Arc::new(AdapterEngine::Xdbc(Arc::new(engine)))
@@ -325,6 +382,7 @@ impl AdapterEngine {
         stmt_splitter: Arc<dyn StmtSplitter>,
         query_comment: QueryCommentConfig,
         type_ops: Box<dyn TypeOps>,
+        relation_cache: Arc<RelationCache>,
         token: CancellationToken,
     ) -> Arc<Self> {
         let engine = ReplayEngine::new(
@@ -335,6 +393,7 @@ impl AdapterEngine {
             stmt_splitter,
             query_comment,
             type_ops,
+            relation_cache,
             token,
         );
         Arc::new(AdapterEngine::Replay(engine))
@@ -350,12 +409,33 @@ impl AdapterEngine {
         matches!(self, AdapterEngine::Mock(_))
     }
 
+    /// Check if this is a sidecar engine (subprocess-based execution)
+    pub fn is_sidecar(&self) -> bool {
+        matches!(self, AdapterEngine::Sidecar(_))
+    }
+
+    /// Get the physical execution backend for sidecar engines
+    ///
+    /// Returns the actual database backend (DuckDB, Snowflake, etc.) that SQL will execute against.
+    /// This differs from adapter_type() which returns the logical adapter type.
+    ///
+    /// Example: Snowflake profile with --execute sidecar
+    /// - adapter_type() returns Snowflake (for type names, Jinja dispatch)
+    /// - physical_backend() returns DuckDB (for SQL execution)
+    pub fn physical_backend(&self) -> Option<Backend> {
+        match self {
+            AdapterEngine::Sidecar(engine) => Some(engine.execution_backend),
+            _ => None,
+        }
+    }
+
     pub fn quoting(&self) -> ResolvedQuoting {
         match self {
             AdapterEngine::Xdbc(engine) => engine.quoting,
             AdapterEngine::Record(engine) => engine.quoting(),
             AdapterEngine::Replay(engine) => engine.quoting(),
             AdapterEngine::Mock(engine) => engine.quoting,
+            AdapterEngine::Sidecar(engine) => engine.quoting,
         }
     }
 
@@ -366,6 +446,7 @@ impl AdapterEngine {
             AdapterEngine::Record(engine) => engine.splitter(),
             AdapterEngine::Replay(engine) => engine.splitter(),
             AdapterEngine::Mock(_) => NAIVE_STMT_SPLITTER.as_ref(),
+            AdapterEngine::Sidecar(_) => NAIVE_STMT_SPLITTER.as_ref(),
         }
     }
 
@@ -375,6 +456,7 @@ impl AdapterEngine {
             AdapterEngine::Record(engine) => engine.type_ops(),
             AdapterEngine::Replay(engine) => engine.type_ops(),
             AdapterEngine::Mock(mock_engine) => mock_engine.type_ops.as_ref(),
+            AdapterEngine::Sidecar(sidecar_engine) => sidecar_engine.type_ops.as_ref(),
         }
     }
 
@@ -399,6 +481,7 @@ impl AdapterEngine {
             AdapterEngine::Record(engine) => engine.query_comment(),
             AdapterEngine::Replay(engine) => engine.query_comment(),
             AdapterEngine::Mock(_) => &EMPTY_CONFIG,
+            AdapterEngine::Sidecar(sidecar_engine) => &sidecar_engine.query_comment,
         }
     }
 
@@ -415,17 +498,20 @@ impl AdapterEngine {
             Self::Record(record_engine) => record_engine.new_connection(None, None),
             Self::Replay(replay_engine) => replay_engine.new_connection(None, None),
             Self::Mock(_) => Ok(Box::new(NoopConnection) as Box<dyn Connection>),
+            Self::Sidecar(sidecar_engine) => sidecar_engine.client.new_connection(None, None),
         }?;
         Ok(conn)
     }
 
     /// Get the adapter type for this engine
+    #[inline]
     pub fn adapter_type(&self) -> AdapterType {
         match self {
             AdapterEngine::Xdbc(actual_engine) => actual_engine.adapter_type(),
             AdapterEngine::Record(record_engine) => record_engine.adapter_type(),
             AdapterEngine::Replay(replay_engine) => replay_engine.adapter_type(),
             AdapterEngine::Mock(mock_engine) => mock_engine.adapter_type,
+            AdapterEngine::Sidecar(sidecar_engine) => sidecar_engine.adapter_type,
         }
     }
 
@@ -435,6 +521,7 @@ impl AdapterEngine {
             AdapterEngine::Record(record_engine) => record_engine.backend(),
             AdapterEngine::Replay(replay_engine) => replay_engine.backend(),
             AdapterEngine::Mock(mock_engine) => backend_of(mock_engine.adapter_type),
+            AdapterEngine::Sidecar(sidecar_engine) => sidecar_engine.execution_backend,
         }
     }
 
@@ -449,6 +536,7 @@ impl AdapterEngine {
             Self::Record(record_engine) => record_engine.new_connection(state, node_id),
             Self::Replay(replay_engine) => replay_engine.new_connection(state, node_id),
             Self::Mock(_) => Ok(Box::new(NoopConnection)),
+            Self::Sidecar(sidecar_engine) => sidecar_engine.client.new_connection(state, node_id),
         }
     }
 
@@ -645,6 +733,7 @@ impl AdapterEngine {
             Self::Record(record_engine) => record_engine.config(key),
             Self::Replay(replay_engine) => replay_engine.config(key),
             Self::Mock(_) => None,
+            Self::Sidecar(sidecar_engine) => sidecar_engine.config.get_string(key),
         }
     }
 
@@ -655,6 +744,7 @@ impl AdapterEngine {
             Self::Record(record_engine) => record_engine.get_config(),
             Self::Replay(replay_engine) => replay_engine.get_config(),
             Self::Mock(_) => unreachable!("Mock engine does not support get_config"),
+            Self::Sidecar(sidecar_engine) => &sidecar_engine.config,
         }
     }
 
@@ -665,6 +755,18 @@ impl AdapterEngine {
             Self::Record(_record_engine) => None,
             Self::Replay(_replay_engine) => None,
             Self::Mock(_) => None,
+            Self::Sidecar(_) => None,
+        }
+    }
+
+    /// Get a reference to the relation cache
+    pub fn relation_cache(&self) -> &Arc<RelationCache> {
+        match self {
+            Self::Xdbc(actual_engine) => &actual_engine.relation_cache,
+            Self::Record(record_engine) => record_engine.relation_cache(),
+            Self::Replay(replay_engine) => replay_engine.relation_cache(),
+            Self::Mock(mock_engine) => &mock_engine.relation_cache,
+            Self::Sidecar(sidecar_engine) => &sidecar_engine.relation_cache,
         }
     }
 
@@ -674,6 +776,7 @@ impl AdapterEngine {
             Self::Record(record_engine) => record_engine.cancellation_token(),
             Self::Replay(replay_engine) => replay_engine.cancellation_token(),
             Self::Mock(_) => never_cancels(),
+            Self::Sidecar(_) => never_cancels(),
         }
     }
 }

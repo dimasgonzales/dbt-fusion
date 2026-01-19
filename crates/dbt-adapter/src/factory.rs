@@ -23,7 +23,7 @@ pub fn create_static_relation(
             let snowflake_relation_type = SnowflakeRelationType(quoting);
             StaticBaseRelationObject::new(Arc::new(snowflake_relation_type))
         }
-        AdapterType::Postgres => {
+        AdapterType::Postgres | AdapterType::Sidecar => {
             let postgres_relation_type = PostgresRelationType(quoting);
             StaticBaseRelationObject::new(Arc::new(postgres_relation_type))
         }
@@ -31,7 +31,7 @@ pub fn create_static_relation(
             let bigquery_relation_type = BigqueryRelationType(quoting);
             StaticBaseRelationObject::new(Arc::new(bigquery_relation_type))
         }
-        AdapterType::Databricks => {
+        AdapterType::Databricks | AdapterType::Spark => {
             let databricks_relation_type = DatabricksRelationType(quoting);
             StaticBaseRelationObject::new(Arc::new(databricks_relation_type))
         }

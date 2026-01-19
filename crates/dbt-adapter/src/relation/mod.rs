@@ -15,9 +15,10 @@ pub mod snowflake;
 mod relation_object;
 pub use relation_object::{
     RelationObject, StaticBaseRelation, StaticBaseRelationObject, create_relation,
-    create_relation_from_node, create_relation_internal,
+    create_relation_from_node, do_create_relation,
 };
 
-// TODO(serramatutu): this is currently being used for tests only
-#[cfg(test)]
 pub(crate) mod config_v2;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;

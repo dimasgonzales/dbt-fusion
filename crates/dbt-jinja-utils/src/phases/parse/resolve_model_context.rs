@@ -86,7 +86,7 @@ pub fn build_resolve_model_context<T: DefaultTo<T> + 'static>(
     let mut context = BTreeMap::new();
     let sql_resources_clone = sql_resources.clone();
     let this_relation = ResolveThisFunction {
-        relation: dbt_adapter::relation::create_relation(
+        relation: dbt_adapter::relation::do_create_relation(
             adapter_type,
             database.to_string(),
             schema.to_string(),
@@ -432,7 +432,7 @@ impl<T: DefaultTo<T>> Object for ResolveRefFunction<T> {
             location,
         )));
 
-        let relation = dbt_adapter::relation::create_relation(
+        let relation = dbt_adapter::relation::do_create_relation(
             self.adapter_type,
             self.database.clone(),
             self.schema.clone(),
@@ -496,7 +496,7 @@ impl<T: DefaultTo<T>> Object for ResolveSourceFunction<T> {
                 )));
 
             // At resolve time, fqn do not have to be accurate
-            Ok(dbt_adapter::relation::create_relation(
+            Ok(dbt_adapter::relation::do_create_relation(
                 self.adapter_type,
                 self.database.clone(),
                 self.schema.clone(),
@@ -583,7 +583,7 @@ impl<T: DefaultTo<T>> Object for ResolveFunctionFunction<T> {
                 location,
             )));
 
-        let relation = dbt_adapter::relation::create_relation(
+        let relation = dbt_adapter::relation::do_create_relation(
             self.adapter_type,
             self.database.clone(),
             self.schema.clone(),
@@ -801,6 +801,10 @@ impl<T: DefaultTo<T>> Object for ParseConfig<T> {
                 let _: String = args.get("name")?;
                 Ok(MinijinjaValue::from(""))
             }
+            // At parse time, return false (no column docs persistence during parsing)
+            "persist_column_docs" => Ok(MinijinjaValue::from(false)),
+            // At parse time, return false (no relation docs persistence during parsing)
+            "persist_relation_docs" => Ok(MinijinjaValue::from(false)),
             _ => Err(MinijinjaError::new(
                 MinijinjaErrorKind::UnknownMethod,
                 format!("Unknown method on parse: {name}"),

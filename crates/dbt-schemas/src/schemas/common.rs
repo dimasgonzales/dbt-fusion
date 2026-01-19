@@ -22,7 +22,7 @@ use crate::schemas::dbt_column::{ColumnPropertiesDimensionType, Granularity};
 use crate::schemas::manifest::common::SourceFileMetadata;
 use crate::schemas::semantic_layer::semantic_manifest::SemanticLayerElementConfig;
 
-use super::serde::StringOrArrayOfStrings;
+use super::serde::{StringOrArrayOfStrings, bool_or_string_bool, bool_or_string_bool_default};
 #[derive(Default, Deserialize, Serialize, Debug, Clone, JsonSchema, PartialEq, Eq)]
 pub struct FreshnessRules {
     pub count: Option<i64>,
@@ -374,8 +374,11 @@ pub struct NodeDependsOn {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ResolvedQuoting {
+    #[serde(deserialize_with = "bool_or_string_bool_default")]
     pub database: bool,
+    #[serde(deserialize_with = "bool_or_string_bool_default")]
     pub identifier: bool,
+    #[serde(deserialize_with = "bool_or_string_bool_default")]
     pub schema: bool,
 }
 
@@ -430,10 +433,17 @@ impl TryFrom<DbtQuoting> for ResolvedQuoting {
 #[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq, Copy, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DbtQuoting {
+    #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub database: Option<bool>,
+    #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub identifier: Option<bool>,
+    #[serde(default, deserialize_with = "bool_or_string_bool")]
     pub schema: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "bool_or_string_bool"
+    )]
     pub snowflake_ignore_case: Option<bool>,
 }
 
@@ -477,7 +487,11 @@ impl TryFrom<StringOrArrayOfStrings> for DbtCheckColsSpec {
                 if all == "all" {
                     Ok(DbtCheckColsSpec::All)
                 } else {
-                    err!(ErrorCode::Generic, "Invalid check_cols value: {}", all)
+                    err!(
+                        ErrorCode::InvalidConfig,
+                        "Invalid check_cols value: {}",
+                        all
+                    )
                 }
             }
             StringOrArrayOfStrings::ArrayOfStrings(cols) => Ok(DbtCheckColsSpec::Cols(cols)),
@@ -626,7 +640,13 @@ impl TryFrom<String> for HardDeletes {
             "ignore" => HardDeletes::Ignore,
             "invalidate" => HardDeletes::Invalidate,
             "new_record" => HardDeletes::NewRecord,
-            _ => return err!(ErrorCode::Generic, "Invalid hard_deletes value: {}", value),
+            _ => {
+                return err!(
+                    ErrorCode::InvalidConfig,
+                    "Invalid hard_deletes value: {}",
+                    value
+                );
+            }
         })
     }
 }
@@ -998,9 +1018,6 @@ pub struct Dimension {
     pub expr: Option<String>,
     pub metadata: Option<SourceFileMetadata>,
     pub config: Option<SemanticLayerElementConfig>,
-    // for internal use only, n/a for derived dimensions
-    #[serde(skip_serializing)]
-    pub column_name: Option<String>,
 }
 
 fn default_false() -> bool {
@@ -1130,13 +1147,26 @@ pub fn _normalize_quote(quoting: bool, dialect: &Dialect, name: &str) -> (String
     }
 }
 
-/// Normalize SQL by removing all whitespace and converting to lowercase.
-/// This ensures consistent checksums regardless of formatting differences.
+/// Normalize SQL by compacting multiple spaces and newlines into a single space.
+/// This ensures consistent checksums regardless of formatting differences
+/// due to multiple spaces and newlines.
 pub fn normalize_sql(sql: &str) -> String {
-    sql.chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase()
+    let mut result = String::with_capacity(sql.len());
+    let mut last_was_whitespace = false;
+
+    for c in sql.chars() {
+        if c.is_whitespace() {
+            if !last_was_whitespace {
+                result.push(' ');
+                last_was_whitespace = true;
+            }
+        } else {
+            result.push(c);
+            last_was_whitespace = false;
+        }
+    }
+
+    result.trim().to_string()
 }
 
 /// Merge two meta maps, with the second map's values taking precedence on key conflicts.

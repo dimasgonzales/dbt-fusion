@@ -6,6 +6,7 @@ use dbt_common::constants::{
     DBT_CATALOGS_YML, DBT_DEPENDENCIES_YML, DBT_PACKAGES_LOCK_FILE, DBT_PACKAGES_YML,
 };
 use dbt_common::once_cell_vars::DISPATCH_CONFIG;
+use dbt_common::tracing::span_info::SpanStatusRecorder;
 use dbt_jinja_utils::invocation_args::InvocationArgs;
 use dbt_jinja_utils::jinja_environment::JinjaEnv;
 use dbt_jinja_utils::phases::load::init::initialize_load_jinja_environment;
@@ -15,7 +16,9 @@ use dbt_schemas::schemas::telemetry::{ExecutionPhase, PhaseExecuted};
 use dbt_schemas::schemas::{DbtCloudConfig, DbtCloudProjectConfig};
 use dbt_schemas::state::DbtProfile;
 use dbt_serde_yaml;
+use dbt_telemetry::GenericOpItemProcessed;
 use fs_deps::get_or_install_packages;
+use indexmap::IndexMap;
 use pathdiff::diff_paths;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -25,18 +28,19 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::SystemTime;
 use std::{fs, io};
+use tracing::Instrument;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use dbt_common::constants::{
     DBT_CLOUD_YML, DBT_CONFIG_DIR, DBT_INTERNAL_PACKAGES_DIR_NAME, DBT_PACKAGES_DIR_NAME,
-    DBT_PROJECT_YML, LOADING,
+    DBT_PROJECT_YML,
 };
 use dbt_common::error::LiftableResult;
 use project::DbtProject;
 
 use dbt_common::stdfs::last_modified;
-use dbt_common::{ErrorCode, ectx, err, tokiofs, with_progress};
+use dbt_common::{ErrorCode, create_debug_span, ectx, err, tokiofs};
 use dbt_common::{FsResult, fs_err};
 use dbt_schemas::schemas::project::{self, DbtProjectSimplified, ProjectDbtCloudConfig};
 use dbt_schemas::state::{DbtAsset, DbtPackage, DbtState, DbtVars, ResourcePathKind};
@@ -54,6 +58,38 @@ use dbt_jinja_utils::serde::{into_typed_with_jinja, value_from_file};
 use dbt_jinja_utils::var_fn;
 
 use dbt_common::tracing::event_info::store_event_attributes;
+
+fn resolve_and_set_threads(
+    dbt_profile: &mut DbtProfile,
+    iarg: &InvocationArgs,
+) -> FsResult<Option<usize>> {
+    let final_threads = if iarg.num_threads.is_none() {
+        if let Some(threads) = dbt_profile.db_config.get_threads() {
+            // Convert StringOrInteger to Option<usize>
+            match threads {
+                StringOrInteger::Integer(n) => Some(*n as usize),
+                StringOrInteger::String(s) => Some(s.parse::<usize>().map_err(|_| {
+                    fs_err!(
+                        ErrorCode::Generic,
+                        "Invalid number of threads in profiles.yml: {s}",
+                    )
+                })?),
+            }
+        } else {
+            None
+        }
+    } else {
+        iarg.num_threads
+    };
+
+    dbt_profile
+        .db_config
+        .set_threads(Some(StringOrInteger::Integer(
+            final_threads.unwrap_or(0) as i64
+        )));
+
+    Ok(final_threads)
+}
 
 #[tracing::instrument(
     skip_all,
@@ -92,31 +128,7 @@ pub async fn load(
     let env = initialize_load_profile_jinja_environment();
     load_catalogs(arg, &env).await?;
 
-    let final_threads = if iarg.num_threads.is_none() {
-        if let Some(threads) = dbt_profile.db_config.get_threads() {
-            // Convert StringOrInteger to Option<usize>
-            match threads {
-                StringOrInteger::Integer(n) => Some(*n as usize),
-                StringOrInteger::String(s) => Some(s.parse::<usize>().map_err(|_| {
-                    fs_err!(
-                        ErrorCode::Generic,
-                        "Invalid number of threads in profiles.yml: {}",
-                        s
-                    )
-                })?),
-            }
-        } else {
-            None
-        }
-    } else {
-        iarg.num_threads
-    };
-
-    dbt_profile
-        .db_config
-        .set_threads(Some(StringOrInteger::Integer(
-            final_threads.unwrap_or(0) as i64
-        )));
+    let final_threads = resolve_and_set_threads(&mut dbt_profile, iarg)?;
 
     let iarg = InvocationArgs {
         num_threads: final_threads,
@@ -237,7 +249,14 @@ pub async fn load(
     let lookup_map = packages_lock.lookup_map();
     let mut collected_vars = vec![];
     {
-        let _pb = with_progress!( arg.io, spinner => LOADING, item => "packages" );
+        // TODO: use a dedicated event. Currently this is tightly coupled with tui_layer and assumes
+        // that `ExecutionPhase::LoadProject` will register it's progress spinner with "load" id.
+        let span = create_debug_span(GenericOpItemProcessed::new(
+            "load".to_string(),
+            "loading".to_string(),
+            "loaded".to_string(),
+            "packages".to_string(),
+        ));
 
         let packages = load_packages(
             &arg,
@@ -248,11 +267,20 @@ pub async fn load(
             &packages_install_path,
             token,
         )
-        .await?;
+        .instrument(span.clone())
+        .await
+        .record_status(&span)?;
         dbt_state.packages = packages;
     }
     {
-        let _pb = with_progress!( arg.io, spinner => LOADING, item => "internal packages" );
+        // TODO: use a dedicated event. Currently this is tightly coupled with tui_layer and assumes
+        // that `ExecutionPhase::LoadProject` will register it's progress spinner with "load" id.
+        let span = create_debug_span(GenericOpItemProcessed::new(
+            "load".to_string(),
+            "loading".to_string(),
+            "loaded".to_string(),
+            "internal packages".to_string(),
+        ));
 
         let packages = load_internal_packages(
             &arg,
@@ -262,7 +290,9 @@ pub async fn load(
             &internal_packages_install_path,
             token,
         )
-        .await?;
+        .instrument(span.clone())
+        .await
+        .record_status(&span)?;
         dbt_state.packages.extend(packages);
         dbt_state.vars = collected_vars.into_iter().collect();
     }
@@ -273,6 +303,34 @@ pub async fn load(
     }
 
     Ok((dbt_state, dbt_cloud_project))
+}
+
+/// Lightweight load function for the `clean` command.
+///
+/// This function loads only the minimal state needed for cleaning
+#[tracing::instrument(
+    skip_all,
+    fields(
+        _e = ?store_event_attributes(PhaseExecuted::start_general(ExecutionPhase::LoadProject)),
+    )
+)]
+pub async fn load_for_clean(arg: &LoadArgs) -> FsResult<DbtState> {
+    let (_simplified_dbt_project, dbt_profile) = load_simplified_project_and_profiles(arg).await?;
+
+    let env = initialize_load_profile_jinja_environment();
+    load_catalogs(arg, &env).await?;
+
+    // Create minimal DbtState - no packages, no vars
+    let dbt_state = DbtState {
+        dbt_profile,
+        run_started_at: run_started_at(),
+        packages: vec![],
+        vars: BTreeMap::new(),
+        cli_vars: arg.vars.clone(),
+        catalogs: load_catalogs::fetch_catalogs(),
+    };
+
+    Ok(dbt_state)
 }
 
 pub async fn load_catalogs(arg: &LoadArgs, env: &JinjaEnv) -> FsResult<()> {
@@ -415,7 +473,7 @@ pub async fn load_inner(
     is_dependency: bool,
     package_lookup_map: &BTreeMap<String, String>,
     skip_dependencies: bool,
-    collected_vars: &mut Vec<(String, BTreeMap<String, DbtVars>)>,
+    collected_vars: &mut Vec<(String, IndexMap<String, DbtVars>)>,
 ) -> FsResult<DbtPackage> {
     // all read files
     let mut all_files: HashMap<ResourcePathKind, Vec<(PathBuf, SystemTime)>> = HashMap::new();
@@ -715,6 +773,7 @@ fn find_files_by_kind_and_extension(
                     package_name: project_name.to_string(),
                     base_path: in_dir.to_path_buf(),
                     path: path.clone(),
+                    original_path: path.clone(),
                 })
         })
         .collect::<HashSet<_>>()
@@ -962,10 +1021,12 @@ async fn prepare_inline_sql(
     tokiofs::create_dir_all(out_dir).await?;
     tokiofs::write(&inline_path, inline_sql).await?;
 
+    let path = PathBuf::from(filename);
     // Create DbtAsset for the inline SQL
     let inline_asset = DbtAsset {
         base_path: out_dir.to_path_buf(),
-        path: PathBuf::from(filename),
+        path: path.clone(),
+        original_path: path,
         package_name: dbt_state.root_project_name().to_string(),
     };
 

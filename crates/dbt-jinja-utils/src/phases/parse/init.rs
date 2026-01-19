@@ -8,7 +8,7 @@ use std::{
 
 use chrono::DateTime;
 use chrono_tz::Tz;
-use dbt_adapter::{BaseAdapter, ParseAdapter, sql_types::NaiveTypeOpsImpl};
+use dbt_adapter::{BaseAdapter, BridgeAdapter, sql_types::NaiveTypeOpsImpl};
 use dbt_common::{
     ErrorCode, FsResult, adapter::AdapterType, cancellation::CancellationToken, fs_err,
     io_args::IoArgs,
@@ -21,6 +21,7 @@ use dbt_schemas::{
     },
     state::DbtVars,
 };
+use indexmap::IndexMap;
 use minijinja::{
     AutoEscape, dispatch_object::THREAD_LOCAL_DEPENDENCIES, macro_unit::MacroUnit,
     value::Value as MinijinjaValue,
@@ -31,7 +32,7 @@ use crate::{
     environment_builder::{JinjaEnvBuilder, MacroUnitsWrapper},
     flags::Flags,
     functions::ConfiguredVar,
-    invocation_args::InvocationArgs,
+    invocation_args::{InvocationArgs, InvocationArgsDict},
     jinja_environment::JinjaEnv,
     phases::utils::build_target_context_map,
 };
@@ -46,7 +47,7 @@ pub fn initialize_parse_jinja_environment(
     db_config: DbConfig,
     package_quoting: DbtQuoting,
     macro_units: BTreeMap<String, Vec<MacroUnit>>,
-    vars: BTreeMap<String, BTreeMap<String, DbtVars>>,
+    vars: BTreeMap<String, IndexMap<String, DbtVars>>,
     cli_vars: BTreeMap<String, dbt_serde_yaml::Value>,
     flags: BTreeMap<String, MinijinjaValue>,
     run_started_at: DateTime<Tz>,
@@ -69,7 +70,7 @@ pub fn initialize_parse_jinja_environment(
     let inv_flags = Flags::from_invocation_args(invocation_args.to_dict());
     let joined_flags = prj_flags.join(inv_flags);
 
-    let invocation_args_dict = Arc::new(joined_flags.to_dict());
+    let invocation_args_dict = InvocationArgsDict::new(joined_flags.to_dict());
 
     let globals = BTreeMap::from([
         (
@@ -97,7 +98,7 @@ pub fn initialize_parse_jinja_environment(
         ),
         (
             "invocation_args_dict".to_string(),
-            MinijinjaValue::from_serialize(invocation_args_dict),
+            MinijinjaValue::from_object(invocation_args_dict),
         ),
         (
             "invocation_id".to_string(),
@@ -118,7 +119,7 @@ pub fn initialize_parse_jinja_environment(
         )
     })?;
     let type_formatter = Box::new(NaiveTypeOpsImpl::new(adapter_type));
-    let adapter = ParseAdapter::new(
+    let adapter = BridgeAdapter::new_parse_phase_adapter(
         adapter_type,
         adapter_config_mapping,
         package_quoting,

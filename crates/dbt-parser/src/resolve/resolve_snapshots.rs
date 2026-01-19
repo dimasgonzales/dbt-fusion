@@ -20,7 +20,10 @@ use dbt_jinja_utils::jinja_environment::JinjaEnv;
 use dbt_jinja_utils::listener::DefaultJinjaTypeCheckEventListenerFactory;
 use dbt_jinja_utils::node_resolver::NodeResolver;
 use dbt_jinja_utils::serde::into_typed_with_jinja;
-use dbt_schemas::schemas::common::{DbtChecksum, DbtMaterialization, DbtQuoting, NodeDependsOn};
+use dbt_schemas::schemas::common::{
+    DbtChecksum, DbtMaterialization, DbtQuoting, NodeDependsOn,
+    conform_normalized_snapshot_raw_code_to_mantle_format, normalize_sql,
+};
 use dbt_schemas::schemas::dbt_column::process_columns;
 use dbt_schemas::schemas::macros::DbtMacro;
 use dbt_schemas::schemas::nodes::AdapterAttr;
@@ -102,6 +105,7 @@ pub async fn resolve_snapshots(
     let mut sql_defined_snapshots = Vec::new();
     // Map target path to original macro path for checksum recalculation
     let mut snapshot_original_paths: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let default_snapshots_path = vec![DBT_SNAPSHOTS_DIR_NAME.to_string()];
     for (macro_uid, macro_node) in macros {
         if macro_node.package_name == package_name && macro_uid.starts_with("snapshot.") {
             // Write the macro call to the `snapshots` directory
@@ -111,8 +115,8 @@ pub async fn resolve_snapshots(
                 .strip_prefix("snapshot_")
                 .expect("All snapshot macros should start with 'snapshot_'")
                 .to_string();
+
             // Preserve file layout for proper fqn generation
-            let default_snapshots_path = vec![DBT_SNAPSHOTS_DIR_NAME.to_string()];
             let original_relative_path = strip_resource_paths_from_ref_path(
                 &macro_node.path,
                 package
@@ -121,6 +125,7 @@ pub async fn resolve_snapshots(
                     .as_ref()
                     .unwrap_or(&default_snapshots_path),
             );
+
             let target_path = PathBuf::from(DBT_SNAPSHOTS_DIR_NAME)
                 .join(original_relative_path.with_file_name(format!("{snapshot_name}.sql")));
             let snapshot_path = arg.io.out_dir.join(&target_path);
@@ -134,12 +139,14 @@ pub async fn resolve_snapshots(
 
             snapshot_files.push(DbtAsset {
                 path: target_path.clone(),
+                original_path: macro_node.path.clone(),
                 package_name: package_name.clone(),
                 base_path: arg.io.out_dir.clone(),
             });
             sql_defined_snapshots.push(target_path);
         }
     }
+
     // Save snapshot from yml to the `snapshots` directory
     for (snapshot_name, mpe) in snapshot_properties.iter_mut() {
         // if mpe.schema_value
@@ -167,12 +174,32 @@ pub async fn resolve_snapshots(
                 // Write SQL for relation to the `snapshots` directory
                 let sql = format!("select * from {relation}");
 
-                let target_path =
-                    PathBuf::from(DBT_SNAPSHOTS_DIR_NAME).join(format!("{snapshot_name}.sql"));
+                // Preserve directory structure from the properties file path
+                // This ensures FQN includes directory components for proper selector matching
+                let default_snapshots_path = vec![DBT_SNAPSHOTS_DIR_NAME.to_string()];
+                let original_relative_path = strip_resource_paths_from_ref_path(
+                    &mpe.relative_path,
+                    package
+                        .dbt_project
+                        .snapshot_paths
+                        .as_ref()
+                        .unwrap_or(&default_snapshots_path),
+                );
+                let target_path = PathBuf::from(DBT_SNAPSHOTS_DIR_NAME)
+                    .join(
+                        original_relative_path
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("")),
+                    )
+                    .join(format!("{snapshot_name}.sql"));
                 let snapshot_path = arg.io.out_dir.join(&target_path);
+                if let Some(parent) = snapshot_path.parent() {
+                    stdfs::create_dir_all(parent)?;
+                }
                 stdfs::write(&snapshot_path, &sql)?;
                 let asset = DbtAsset {
                     path: target_path.clone(),
+                    original_path: mpe.relative_path.clone(),
                     package_name: package_name.clone(),
                     base_path: arg.io.out_dir.clone(),
                 };
@@ -524,8 +551,12 @@ async fn recalculate_snapshot_checksum(
     let original_absolute_path = arg.io.in_dir.join(original_path);
     match tokiofs::read_to_string(&original_absolute_path).await {
         Ok(original_sql) => {
-            // Hash the original SQL directly without normalization to match mantle behavior
-            DbtChecksum::hash(original_sql.as_bytes())
+            // First normalize: remove all whitespace and lowercase
+            let normalized_full = normalize_sql(&original_sql);
+
+            let normalized_sql =
+                conform_normalized_snapshot_raw_code_to_mantle_format(&normalized_full);
+            DbtChecksum::hash(normalized_sql.as_bytes())
         }
         Err(e) => {
             // Fallback to sql_file_info checksum if original file can't be read

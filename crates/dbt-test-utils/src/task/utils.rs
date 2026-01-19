@@ -4,10 +4,11 @@ use super::TestResult;
 use super::log_capture::JsonLogEvent;
 use clap::Parser;
 use dbt_common::{
-    DiscreteEventEmitter, FsError,
+    FsError,
     cancellation::{CancellationToken, never_cancels},
     tracing::FsTraceConfig,
 };
+use std::fmt::Debug;
 use std::{
     fs::File,
     future::Future,
@@ -24,6 +25,7 @@ use dbt_common::{
     stdfs::{self},
     tokiofs, unexpected_err,
 };
+use dbt_features::feature_stack::FeatureStack;
 
 // Pre-compiled regex patterns for optimal performance
 static SCHEMA_PATTERN: Lazy<Regex> =
@@ -283,26 +285,26 @@ pub fn strip_leading_relative(path: &Path) -> &Path {
 // Util function to execute fusion commands in tests
 #[allow(clippy::too_many_arguments)]
 pub async fn exec_fs<Fut, P: Parser>(
+    feature_stack: Arc<FeatureStack>,
     cmd_vec: Vec<String>,
     project_dir: PathBuf,
     target_dir: PathBuf,
     stdout_file: File,
     stderr_file: File,
-    execute_fs: impl FnOnce(SystemArgs, P, Arc<dyn DiscreteEventEmitter>, CancellationToken) -> Fut,
+    execute_fs: impl FnOnce(SystemArgs, P, Arc<FeatureStack>, CancellationToken) -> Fut,
     from_lib: impl FnOnce(&P) -> SystemArgs,
     tracing_handle: TracingReloadHandle,
 ) -> FsResult<i32>
 where
     Fut: Future<Output = FsResult<i32>>,
 {
-    let event_emitter: Arc<dyn DiscreteEventEmitter> = vortex_events::noop_event_emitter().into();
     let token = never_cancels();
     // Check if project_dir has a .env.conformance file
     // NOTE: this has to be done before we parse Cli
     let conformance_file = project_dir.join(".env.conformance");
     if conformance_file.exists() {
         // if so, load it
-        dotenv::from_path(conformance_file).unwrap();
+        dotenvy::from_path(conformance_file).unwrap();
     }
 
     // Redirect stdout and stderr to the specified files until the end of this
@@ -323,7 +325,7 @@ where
     let (middlewares, consumer_layers, mut shutdown_items) = trace_config.build_layers()?;
     tracing_handle.with_tracing_consumer(middlewares, consumer_layers);
 
-    let result = execute_fs(arg, cli, event_emitter, token).await;
+    let result = execute_fs(arg, cli, feature_stack, token).await;
 
     let shutdown_errors: Vec<FsError> = shutdown_items
         .iter_mut()
@@ -490,4 +492,13 @@ pub fn assert_str_in_log_messages(logs: &[JsonLogEvent], search_str: &str) -> Fs
     } else {
         panic!("Log message containing '{search_str}' not found");
     }
+}
+
+/// Helper function to assert that two vectors are equal, ignoring order.
+pub fn assert_vec_sorted_eq<T: PartialEq + Clone + Ord + Debug>(expected: Vec<T>, actual: Vec<T>) {
+    let mut expected = expected;
+    expected.sort();
+    let mut actual = actual;
+    actual.sort();
+    assert_eq!(expected, actual);
 }

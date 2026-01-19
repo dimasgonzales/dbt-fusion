@@ -7,6 +7,8 @@ pub fn compare_sql(actual: &str, expected: &str) -> AdapterResult<()> {
     // Canonicalize ignorable differences first
     let actual = canonicalize_query_tag(actual);
     let expected = canonicalize_query_tag(expected);
+    let actual = canonicalize_typographic_quotes_in_dollar_quoted_strings(&actual);
+    let expected = canonicalize_typographic_quotes_in_dollar_quoted_strings(&expected);
     let actual = canonicalize_uuid_literals(&actual);
     let expected = canonicalize_uuid_literals(&expected);
     let actual = canonicalize_uuid_prefixed_test_unique_id_literals(&actual);
@@ -19,6 +21,8 @@ pub fn compare_sql(actual: &str, expected: &str) -> AdapterResult<()> {
     let expected = canonicalize_elementary_tmp_suffix(&expected);
     let actual = canonicalize_test_temp_relation_identifiers(&actual);
     let expected = canonicalize_test_temp_relation_identifiers(&expected);
+    let actual = canonicalize_elementary_metadata_pkg_version(&actual);
+    let expected = canonicalize_elementary_metadata_pkg_version(&expected);
 
     // Short-circuit: Elementary-generated SQL is allowed to drift across recorders/runners.
     // We only short-circuit when BOTH sides are clearly Elementary-originated.
@@ -41,10 +45,22 @@ pub fn compare_sql(actual: &str, expected: &str) -> AdapterResult<()> {
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>();
-    // In addition, remove trailing comments /* ... */ in expected
+    // In addition, remove trailing comments /* ... */ in both actual and expected
+    let actual_normalized = if actual_normalized.ends_with("*/") {
+        if let Some(last_comment_start) = actual_normalized.rfind("/*") {
+            actual_normalized[..last_comment_start].to_string()
+        } else {
+            actual_normalized
+        }
+    } else {
+        actual_normalized
+    };
     let expected_normalized = if expected_normalized.ends_with("*/") {
-        let last_comment_start = expected_normalized.rfind("/*").unwrap();
-        expected_normalized[..last_comment_start].to_string()
+        if let Some(last_comment_start) = expected_normalized.rfind("/*") {
+            expected_normalized[..last_comment_start].to_string()
+        } else {
+            expected_normalized
+        }
     } else {
         expected_normalized
     };
@@ -68,7 +84,7 @@ pub fn compare_sql(actual: &str, expected: &str) -> AdapterResult<()> {
     let diff_info = generate_visual_sql_diff(&actual, &expected);
 
     Err(AdapterError::new(
-        AdapterErrorKind::UnexpectedResult,
+        AdapterErrorKind::SqlMismatch,
         format!("SQL mismatch detected:\n\n{diff_info}"),
     ))
 }
@@ -272,17 +288,13 @@ fn split_union_all_top_level(s: &str) -> Option<Vec<&str>> {
     let mut depth = 0usize;
     let mut start = 0usize;
     let lower = s.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
+    let mut iter = lower.char_indices().peekable();
+    while let Some((i, ch)) = iter.next() {
         if ch == '(' {
             depth += 1;
-            i += 1;
             continue;
         } else if ch == ')' {
             depth = depth.saturating_sub(1);
-            i += 1;
             continue;
         }
         if depth == 0 && lower[i..].starts_with("union") {
@@ -295,12 +307,18 @@ fn split_union_all_top_level(s: &str) -> Option<Vec<&str>> {
                 let left = s[start..i].trim();
                 parts.push(left);
                 // advance past "union all"
-                i = k_after_ws + "all".len();
-                start = i;
+                let next_i = k_after_ws + "all".len();
+                start = next_i;
+                while let Some(&(peek_i, _)) = iter.peek() {
+                    if peek_i < next_i {
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
                 continue;
             }
         }
-        i += 1;
     }
     // push final segment
     let last = s[start..].trim();
@@ -328,30 +346,28 @@ fn parse_create_as_subquery(s: &str) -> Option<(&str, &str)> {
     let stuff_start = i;
     // Find 'as' followed by '(' (case-insensitive), not inside parentheses
     let lower = s.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
     let mut depth = 0usize;
     let mut as_pos: Option<usize> = None;
-    let mut j = i;
-    while j < bytes.len() {
-        let ch = bytes[j] as char;
+    let iter = lower.char_indices().peekable();
+    for (j, ch) in iter {
+        if j < i {
+            continue;
+        }
         if ch == '(' {
             depth += 1;
-            j += 1;
             continue;
         } else if ch == ')' {
             depth = depth.saturating_sub(1);
-            j += 1;
             continue;
         }
         if depth == 0 && lower[j..].starts_with("as") {
             let mut k = j + 2;
             k = skip_ws(&lower, k);
-            if k < bytes.len() && (lower.as_bytes()[k] as char) == '(' {
+            if k < lower.len() && (lower.as_bytes()[k] as char) == '(' {
                 as_pos = Some(j);
                 break;
             }
         }
-        j += 1;
     }
     let as_pos = as_pos?;
     let stuff = s[stuff_start..as_pos].trim();
@@ -391,6 +407,41 @@ fn canonicalize_uuid_literals(sql: &str) -> String {
         Regex::new(r"(?i)'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'").unwrap()
     });
     UUID_RE.replace_all(sql, "'UUID'").to_string()
+}
+
+/// Canonicalize Elementary metadata `dbt_pkg_version` drift for the Elementary metadata package only.
+///
+/// Elementary creates/updates a metadata table like:
+/// `... analytics_elementary_metadata.metadata as (select '0.21.0' as dbt_pkg_version)`
+///
+/// The specific package version string isn't semantically meaningful for replay comparison, but
+/// we scope this canonicalization narrowly to avoid masking legitimate literal differences.
+fn canonicalize_elementary_metadata_pkg_version(sql: &str) -> String {
+    // Fast-path: only touch likely Elementary `model.elementary.metadata` materializations.
+    //
+    // Projects can change where Elementary models land (database/schema), so we cannot rely on a
+    // fixed schema/table prefix like `analytics_elementary_metadata.metadata`.
+    //
+    // Instead, we scope this canonicalization to DDL that creates a `... .metadata` table and
+    // contains the `dbt_pkg_version` field literal.
+    let lower = sql.to_ascii_lowercase();
+    if !lower.contains("dbt_pkg_version") {
+        return sql.to_string();
+    }
+    // Must look like DDL for a table named `metadata`.
+    // We keep this intentionally conservative to avoid masking unrelated literals.
+    if !(lower.contains("create or replace")
+        && lower.contains("table")
+        && lower.contains(".metadata"))
+    {
+        return sql.to_string();
+    }
+
+    static RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+        Regex::new(r"(?i)'[0-9]+(?:\.[0-9]+){2}'\s+as\s+dbt_pkg_version").unwrap()
+    });
+    RE.replace_all(sql, "'DBT_PKG_VERSION' as dbt_pkg_version")
+        .to_string()
 }
 
 fn is_elementary_query(sql: &str) -> bool {
@@ -549,6 +600,42 @@ fn canonicalize_cte_boundaries(norm_sql: String) -> String {
 
 fn remove_all_parens(s: &str) -> String {
     s.replace(['(', ')'], "")
+}
+
+/// Normalize typographic quotes inside `$$...$$` dollar-quoted strings.
+///
+/// Some SQL generators/editors may emit unicode “smart quotes” within `COMMENT $$...$$`
+/// clauses. For replay comparison purposes, we consider those equivalent to ASCII quotes.
+fn canonicalize_typographic_quotes_in_dollar_quoted_strings(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    let mut in_dollar = false;
+
+    while let Some(pos) = rest.find("$$") {
+        let (segment, after_segment) = rest.split_at(pos);
+        if in_dollar {
+            out.extend(segment.chars().map(|c| match c {
+                '\u{201C}' | '\u{201D}' => '"',
+                _ => c,
+            }));
+        } else {
+            out.push_str(segment);
+        }
+        out.push_str("$$");
+        rest = &after_segment[2..];
+        in_dollar = !in_dollar;
+    }
+
+    if in_dollar {
+        out.extend(rest.chars().map(|c| match c {
+            '\u{201C}' | '\u{201D}' => '"',
+            _ => c,
+        }));
+    } else {
+        out.push_str(rest);
+    }
+
+    out
 }
 
 fn fuzzy_compare_sql(actual: &str, expected: &str) -> bool {
@@ -857,6 +944,32 @@ mod tests {
         assert!(
             result.is_err(),
             "Should detect content differences even with newlines"
+        );
+    }
+
+    #[test]
+    fn test_split_union_all_top_level_splits_and_handles_unicode() {
+        // Regression test: previously this could panic if the scan index landed in the middle
+        // of a multi-byte UTF-8 char (e.g. “).
+        let sql = "select 1 as a /* “unicode” */ UNION   ALL   select 2 as b";
+        let parts = split_union_all_top_level(sql).expect("should split on top-level UNION ALL");
+        assert_eq!(
+            parts,
+            vec!["select 1 as a /* “unicode” */", "select 2 as b"]
+        );
+    }
+
+    #[test]
+    fn test_split_union_all_top_level_does_not_split_inside_parentheses() {
+        let sql = "select 1 as a union all select (select 2 as b union all select 3 as c)";
+        let parts =
+            split_union_all_top_level(sql).expect("should split on the top-level UNION ALL");
+        assert_eq!(
+            parts,
+            vec![
+                "select 1 as a",
+                "select (select 2 as b union all select 3 as c)"
+            ]
         );
     }
 
@@ -2280,6 +2393,97 @@ where full_table_name is not null
         assert!(
             result.is_ok(),
             "Should treat union-all sets equal regardless of order within the CTE body"
+        );
+    }
+
+    #[test]
+    fn test_compare_sql_dollar_quoted_typographic_quotes_ignored() {
+        let actual = r#""ORDER_TYPE" COMMENT $$If is_renewal flag is set to 'TRUE' then we are tagging them as 'RENEWAL ORDER'.If it is set to false, but it is a later transaction of Credit type then it is called a "REFUND ORDER" else "FIRST ORDER"$$"#;
+        let expected = r#""ORDER_TYPE" COMMENT $$If is_renewal flag is set to 'TRUE' then we are tagging them as 'RENEWAL ORDER'.If it is set to false, but it is a later transaction of Credit type then it is called a “REFUND ORDER” else “FIRST ORDER”$$"#;
+        let result = compare_sql(actual, expected);
+        assert!(
+            result.is_ok(),
+            "Typographic quotes inside dollar-quoted strings should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_compare_sql_elementary_pkg_version_drift_ignored() {
+        let actual = r#"
+create or replace transient  table DB_FANANALYTICS.analytics_elementary_metadata.metadata
+    
+    
+    
+    as (
+
+SELECT
+    '0.21.0' as dbt_pkg_version
+    )
+;
+"#;
+        let expected = r#"
+create or replace transient table DB_FANANALYTICS.analytics_elementary_metadata.metadata
+    
+    
+    
+    as (
+
+SELECT
+    '0.20.1' as dbt_pkg_version
+    )
+;
+"#;
+
+        let result = compare_sql(actual, expected);
+        assert!(
+            result.is_ok(),
+            "Elementary metadata package version drift should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_compare_sql_elementary_pkg_version_drift_ignored_with_renamed_schema() {
+        // Regression: some projects materialize Elementary's `metadata` model into the project's
+        // target schema (or other renamed schemas), not `analytics_elementary_metadata`.
+        let actual = r#"
+create or replace transient  table SAM_CLARK_SANDBOX.weather_analytics_prd.metadata
+    as (
+SELECT
+    '0.21.0' as dbt_pkg_version
+    )
+;
+"#;
+        let expected = r#"
+create or replace transient table SAM_CLARK_SANDBOX.weather_analytics_prd.metadata
+    as (
+SELECT
+    '0.20.1' as dbt_pkg_version
+    )
+;
+"#;
+
+        let result = compare_sql(actual, expected);
+        assert!(
+            result.is_ok(),
+            "Elementary metadata package version drift should be ignored even when schema is renamed"
+        );
+    }
+
+    #[test]
+    fn test_compare_sql_elementary_metadata_comment_ignored() {
+        let actual = r#"select metadata_hash 
+    from OPERATIONS_PRD.MFG_INSTRUMENTS.dbt_exposures
+    order by metadata_hash
+    /* --ELEMENTARY-METADATA-- {"invocation_id": "019ba036-aec2-71a3-8709-a31b68ced8b0", "command": "build", "package_name": "elementary", "resource_name": "dbt_exposures", "resource_type": "model"} --END-ELEMENTARY-METADATA-- */"#;
+
+        let expected = r#"select metadata_hash 
+    from OPERATIONS_PRD.MFG_INSTRUMENTS.dbt_exposures
+    order by metadata_hash"#;
+
+        let result = compare_sql(actual, expected);
+        assert!(
+            result.is_ok(),
+            "Elementary metadata comments should be ignored"
         );
     }
 }

@@ -20,8 +20,6 @@ use crate::machinery::Span;
 use crate::output::{CaptureMode, Output};
 use crate::utils::{untrusted_size_hint, AutoEscape};
 use crate::value::mutable_map::MutableMap;
-use crate::value::mutable_vec::MutableVec;
-use crate::value::namespace_name::NamespaceName;
 use crate::value::namespace_object::Namespace;
 use crate::value::Object;
 use crate::value::{
@@ -37,7 +35,7 @@ use crate::vm::closure_object::Closure;
 
 pub(crate) use crate::vm::context::{Context, Frame};
 pub use crate::vm::state::State;
-use crate::OutputTracker;
+use crate::{CodeLocation, OutputTracker};
 
 #[cfg(feature = "macros")]
 mod closure_object;
@@ -90,6 +88,33 @@ where
     }
 }
 
+/// Wrapper for return values originating from within a `{% call %}` block.
+///
+/// When `return()` is called inside a `{% call %}` block (i.e., within a `caller()` invocation),
+/// the return value must propagate up **2 levels** of the call stack:
+///
+/// 1. **Level 1 (caller block)**: The `caller()` function executes the call block body.
+///    When a `return()` is encountered, the value is wrapped in `CallerReturn` and returned
+///    from the `caller()` call.
+///
+/// 2. **Level 2 (enclosing macro)**: The macro that invoked `caller()` receives the
+///    `CallerReturn` wrapper. It must unwrap the value and treat it as an explicit return,
+///    causing the macro itself to return that value to its caller.
+///
+/// Without this 2-level propagation, the return value would be consumed by the inner
+/// `caller()` invocation but not propagate out of the enclosing macro.
+///
+/// Example:
+/// ```jinja
+/// {%- macro my_statement() -%}
+///     {%- set compiled_code = caller() -%}
+/// {%- endmacro -%}
+/// {%- macro outer() -%}
+///   {%- call my_statement() -%}
+///     {{- return('value') -}}  {# This return must propagate out of outer() #}
+///   {%- endcall -%}
+/// {%- endmacro -%}
+/// ```
 #[derive(Clone, Debug)]
 struct CallerReturn {
     value: Value,
@@ -101,6 +126,27 @@ impl CallerReturn {
     pub fn new(value: Value) -> Self {
         CallerReturn { value }
     }
+}
+
+/// Wrapper function for calling a function.
+/// This wrapper tells listeners that the function is being entered and exited.
+/// The reason we need to track function entry and exit is because of malicious return
+/// malicious return causes unbalanced MacroStart and MacroStop
+/// e.g. {% if condition %} {{ return(1) + 1 }} {% endif %}
+/// The rendering flow creates 2 MacroStart and encounters return. If we don't track function entry and exit,
+/// we will not know when to pop the MacroStart from the stack.
+fn call_wrapper(
+    listeners: &[Rc<dyn RenderingEventListener>],
+    function_call: impl FnOnce() -> Result<Value, Error>,
+) -> Result<Value, Error> {
+    listeners.iter().for_each(|listener| {
+        listener.on_function_start();
+    });
+    let rv = function_call();
+    listeners.iter().for_each(|listener| {
+        listener.on_function_end();
+    });
+    rv
 }
 
 impl<'env> Vm<'env> {
@@ -298,7 +344,6 @@ impl<'env> Vm<'env> {
             }};
         }
 
-        let namespace_registry = self.env.get_macro_namespace_registry().unwrap_or_default();
         let root_package_name = self.env.get_root_package_name();
         let template_registry = self.env.get_macro_template_registry();
 
@@ -338,7 +383,9 @@ impl<'env> Vm<'env> {
                     stack.push(match ops::$method(&a, &b) {
                         Ok(rv) => rv,
                         Err(e) if e.kind() == ErrorKind::InvalidOperation => {
-                            match a.call_method(state, $obj_method, &[b], listeners) {
+                            match call_wrapper(listeners, || {
+                                a.call_method(state, $obj_method, &[b], listeners)
+                            }) {
                                 Ok(rv) => rv,
                                 Err(e2) if e2.kind() == ErrorKind::UnknownMethod => {
                                     return Err(state.with_span_error(e, &$span));
@@ -404,10 +451,7 @@ impl<'env> Vm<'env> {
                             .is_undefined()
                     {
                         stack.push(state.lookup(name).expect("we just checked that it is some"));
-                    } else if namespace_registry.contains_key(&Value::from(name as &str)) {
-                        stack.push(Value::from_object(NamespaceName::new(name)));
-                    // check if it is a regular variable in state first
-                    // Somehow a macro try to set all varibale it uses to undefined
+                    // Try to resolve as a macro name (e.g., bare `get_revoke_sql`)
                     } else if let Some(template_name) =
                         macro_namespace_template_resolver(state, name, &mut Vec::new())
                     {
@@ -419,6 +463,8 @@ impl<'env> Vm<'env> {
                                 auto_execute: false,
                                 context: Some(state.get_base_context()),
                             }));
+                        } else {
+                            stack.push(Value::UNDEFINED);
                         }
                     // check if it is a regular variable in the state
                     } else {
@@ -427,53 +473,24 @@ impl<'env> Vm<'env> {
                 }
                 Instruction::GetAttr(name, span) => {
                     let a = stack.pop();
-                    // This is a common enough operation that it's interesting to consider a fast
-                    // path here.  This is slightly faster than the regular attr lookup because we
-                    // do not need to pass down the error object for the more common success case.
-                    // Only when we cannot look up something, we start to consider the undefined
-                    // special case.
-                    stack.push(match a.get_attr_fast(name) {
-                        Some(value) => value
-                            .validate()
-                            .map_err(|e| state.with_span_error(e, span))?,
-                        None => {
-                            if let Some(namespace) = a.downcast_object_ref::<NamespaceName>() {
-                                let ns_name = Value::from(namespace.get_name());
-                                // a could be a package name, we need to check if there's a macro in the namespace
-                                if namespace_registry.get(&ns_name).is_some_and(|val| {
-                                    val.downcast_object::<MutableVec<Value>>()
-                                        .unwrap_or_default()
-                                        .contains(&Value::from(name as &str))
-                                }) {
-                                    let template_registry_entry = template_registry.get(&ns_name);
-                                    let path = template_registry_entry
-                                        .and_then(|entry| entry.get_attr_fast("path"))
-                                        .unwrap_or(ns_name);
-                                    let span = template_registry_entry
-                                        .and_then(|entry| entry.get_attr_fast("span"))
-                                        .unwrap_or_else(|| Value::from_serialize(Span::default()));
-
-                                    let context =
-                                        state.get_base_context_with_path_and_span(&path, &span);
-                                    Value::from_object(DispatchObject {
-                                        macro_name: (*name).to_string(),
-                                        package_name: Some(namespace.get_name().to_string()),
-                                        strict: true,
-                                        auto_execute: false,
-                                        context: Some(context),
-                                    })
-                                } else {
-                                    undefined_behavior
-                                        .handle_undefined(a.is_undefined())
-                                        .map_err(|e| state.with_span_error(e, span))?
-                                }
-                            } else {
-                                undefined_behavior
-                                    .handle_undefined(a.is_undefined())
-                                    .map_err(|e| state.with_span_error(e, span))?
-                            }
-                        }
-                    });
+                    if let Some(value) = a.get_attr_fast(name) {
+                        stack.push(
+                            value
+                                .validate()
+                                .map_err(|e| state.with_span_error(e, span))?,
+                        );
+                    } else if let Some(result) = a
+                        .as_object()
+                        .and_then(|obj| obj.get_property(state, name, listeners).ok())
+                    {
+                        stack.push(result);
+                    } else {
+                        stack.push(
+                            undefined_behavior
+                                .handle_undefined(a.is_undefined())
+                                .map_err(|e| state.with_span_error(e, span))?,
+                        );
+                    }
                 }
                 Instruction::SetAttr(name, span) => {
                     let b = stack.pop();
@@ -668,6 +685,10 @@ impl<'env> Vm<'env> {
                     let a = stack.pop();
                     stack.push(ops::neg(&a).map_err(|e| state.with_span_error(e, span))?);
                 }
+                Instruction::Pos(span) => {
+                    let a = stack.pop();
+                    stack.push(ops::pos(&a).map_err(|e| state.with_span_error(e, span))?);
+                }
                 Instruction::PushWith(span) => {
                     state
                         .ctx
@@ -779,7 +800,7 @@ impl<'env> Vm<'env> {
                 Instruction::CallBlock(name) => {
                     if parent_instructions.is_none() && !out.is_discarding() {
                         out.write_str(
-                            self.call_block(name, state, listeners)?
+                            call_wrapper(listeners, || self.call_block(name, state, listeners))?
                                 .as_str()
                                 .unwrap_or_default(),
                         )?;
@@ -862,9 +883,20 @@ impl<'env> Vm<'env> {
                         pc += 1;
                         continue;
                     }
-                    listeners.iter().for_each(|listener| {
-                        listener.on_reference(name);
-                    });
+                    // if return is called here, it means return is not on the top level of block
+                    // e.g. {{ return(1) + 1 }}
+                    // we should warn it
+                    if *name == "return" {
+                        listeners.iter().for_each(|listener| {
+                            listener.on_malicious_return(&CodeLocation::new(
+                                this_span.start_line,
+                                this_span.start_col,
+                                state.ctx.current_path.clone(),
+                            ));
+                        });
+                        break;
+                    }
+
                     let args = stack.get_call_args(*arg_count);
                     // super is a special function reserved for super-ing into blocks.
                     let rv = if *name == "super" {
@@ -926,7 +958,7 @@ impl<'env> Vm<'env> {
                                 state.ctx.depth() + INCLUDE_RECURSION_COST,
                             )?;
                         let func = inner_state.lookup(name).unwrap();
-                        func.call(&inner_state, args, listeners)
+                        call_wrapper(listeners, || func.call(&inner_state, args, listeners))
                             .map_err(|err| state.with_span_error(err, this_span))?
                     } else if let Some(func) =
                         state.lookup(name).filter(|func| !func.is_undefined())
@@ -954,12 +986,16 @@ impl<'env> Vm<'env> {
                             args.to_vec()
                         };
 
-                        let rv = func
-                            .call(state, &args, listeners)
+                        let rv = call_wrapper(listeners, || func.call(state, &args, listeners))
                             .map_err(|err| state.with_span_error(err, this_span))?;
+                        // Handle CallerReturn: when a return() was called inside a {% call %} block,
+                        // the caller() function wraps it in CallerReturn. We unwrap it here and
+                        // mark this frame as an explicit return so the value propagates out of
+                        // the enclosing macro (2nd level of propagation). See CallerReturn docs.
                         if let Some(obj) = rv.as_object() {
                             if let Some(caller_return) = obj.downcast_ref::<CallerReturn>() {
                                 stack.push(caller_return.value.clone());
+                                is_explicit_return = true;
                                 break;
                             }
                         }
@@ -1023,7 +1059,7 @@ impl<'env> Vm<'env> {
 
                         // look up and evaluate the macro
                         let func = new_state.lookup(name).unwrap();
-                        func.call(&new_state, &args, listeners)
+                        call_wrapper(listeners, || func.call(&new_state, &args, listeners))
                             .map_err(|err| state.with_span_error(err, this_span))?
                     } else if *name == "render" {
                         let raw = args[0].as_str().unwrap_or_default();
@@ -1060,51 +1096,8 @@ impl<'env> Vm<'env> {
                     let args = stack.get_call_args(*arg_count);
                     let arg_count = args.len();
 
-                    let a = if let Some(ns) = args[0].downcast_object_ref::<NamespaceName>() {
-                        let ns_name = ns.get_name();
-                        let args = &args[1..];
-
-                        // For namespaced calls, report the full qualified name
-                        let qualified_name = format!("{ns_name}.{name}");
-                        listeners
-                            .iter()
-                            .for_each(|listener| listener.on_reference(&qualified_name));
-                        // if not found, attempt to lookup the template and function using name stripped of test_
-                        // see generate_test_macro in resolve_generic_tests.rs -> a subset of generated macro names are prefixed with test_
-                        let Ok(template) = self.env.get_template(&qualified_name) else {
-                            return Err(state.with_span_error(
-                                Error::new(
-                                    ErrorKind::UnknownFunction,
-                                    format!("Jinja macro or function `{name}` is unknown"),
-                                ),
-                                this_span,
-                            ));
-                        };
-
-                        let template_registry_entry =
-                            template_registry.get(&Value::from(qualified_name.clone()));
-                        let path = template_registry_entry
-                            .and_then(|entry| entry.get_attr_fast("path"))
-                            .unwrap_or_else(|| Value::from(qualified_name));
-                        let span = template_registry_entry
-                            .and_then(|entry| entry.get_attr_fast("span"))
-                            .unwrap_or_else(|| Value::from_serialize(Span::default()));
-
-                        let ctx = state.get_base_context_with_path_and_span(&path, &span);
-                        let macro_state = template.eval_to_state_with_outer_stack_depth(
-                            ctx,
-                            listeners,
-                            state.ctx.depth() + MACRO_RECURSION_COST,
-                        )?;
-                        let func = macro_state.lookup(name).unwrap();
-                        func.call(&macro_state, args, listeners)
-                            .map_err(|err| state.with_span_error(err, this_span))?
-                    } else {
+                    let a = {
                         // For non-namespaced calls, report just the name
-                        listeners
-                            .iter()
-                            .for_each(|listener| listener.on_reference(name));
-
                         let function_name = args[0]
                             .get_attr_fast("function_name")
                             .map(|x| x.to_string())
@@ -1126,19 +1119,33 @@ impl<'env> Vm<'env> {
                         } else {
                             args[1..].to_vec()
                         };
-                        let res = args[0].call_method(state, name, &args_vals, listeners);
+                        let res = call_wrapper(listeners, || {
+                            args[0].call_method(state, name, &args_vals, listeners)
+                        });
                         match res {
                             Ok(rv) => match rv.downcast_object::<DispatchObject>() {
                                 // If we return DispatchObject from a
                                 // method call, we immediately forward
                                 // the call to the dispatch object.
-                                Some(obj) if obj.auto_execute => obj
-                                    .call(state, &args[1..], listeners)
-                                    .map_err(|e| state.with_span_error(e, this_span))?,
+                                Some(obj) if obj.auto_execute => call_wrapper(listeners, || {
+                                    obj.call(state, &args[1..], listeners)
+                                })
+                                .map_err(|e| state.with_span_error(e, this_span))?,
                                 _ => rv,
                             },
                             Err(err) => {
-                                return Err(state.with_span_error(err, this_span));
+                                // try arg[0].get_property(name)(args[1..])
+                                if let Some(property) = args[0]
+                                    .as_object()
+                                    .and_then(|obj| obj.get_property(state, name, listeners).ok())
+                                {
+                                    call_wrapper(listeners, || {
+                                        property.call(state, &args[1..], listeners)
+                                    })
+                                    .map_err(|e| state.with_span_error(e, this_span))?
+                                } else {
+                                    return Err(state.with_span_error(err, this_span));
+                                }
                             }
                         }
                     };
@@ -1148,8 +1155,7 @@ impl<'env> Vm<'env> {
                 Instruction::CallObject(arg_count, span) => {
                     let args = stack.get_call_args(*arg_count);
                     let arg_count = args.len();
-                    let a = args[0]
-                        .call(state, &args[1..], listeners)
+                    let a = call_wrapper(listeners, || args[0].call(state, &args[1..], listeners))
                         .map_err(|e| state.with_span_error(e, span))?;
                     stack.drop_top(arg_count);
                     stack.push(a);
@@ -1232,9 +1238,6 @@ impl<'env> Vm<'env> {
                 }
                 #[cfg(feature = "macros")]
                 Instruction::BuildMacro(name, offset, flags, _) => {
-                    listeners
-                        .iter()
-                        .for_each(|listener| listener.on_definition(name));
                     self.build_macro(&mut stack, state, *offset, name, *flags);
                 }
                 #[cfg(feature = "macros")]
@@ -1334,12 +1337,6 @@ impl<'env> Vm<'env> {
 
         if is_caller_return {
             let rv = stack.pop();
-            if rv.as_str().is_none() {
-                return Err(Error::new(
-                    ErrorKind::InvalidOperation,
-                    "caller() must return a string",
-                ));
-            }
             Ok(Value::from_object(CallerReturn::new(rv)))
         } else if is_explicit_return {
             Ok(stack.pop())

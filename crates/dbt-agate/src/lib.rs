@@ -7,11 +7,12 @@ use std::sync::Arc;
 use minijinja::arg_utils::ArgsIter;
 use minijinja::listener::RenderingEventListener;
 use minijinja::value::{Enumerator, Object, ObjectRepr};
-use minijinja::{Error as MinijinjaError, ErrorKind, State, Value, assert_nullary_args};
+use minijinja::{ErrorKind, State, Value, assert_nullary_args};
 
 mod column;
 mod columns;
 mod converters;
+pub mod data_type; // TODO: rename to data_types
 mod decimal;
 pub mod grouper;
 pub mod hashers;
@@ -26,6 +27,7 @@ mod vec_of_rows;
 
 pub use column::Column;
 pub use columns::Columns;
+pub use data_type::DataType;
 pub use row::Row;
 pub use rows::Rows;
 pub use table::AgateTable;
@@ -112,6 +114,8 @@ impl fmt::Display for Tuple {
     }
 }
 
+impl Eq for Tuple {}
+
 impl PartialEq for Tuple {
     fn eq(&self, other: &Self) -> bool {
         self.0.eq_repr(&*other.0)
@@ -146,7 +150,7 @@ impl Object for Tuple {
         name: &str,
         args: &[Value],
         listeners: &[Rc<dyn RenderingEventListener>],
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         match name {
             "count" => {
                 let iter = ArgsIter::for_unnamed_pos_args("tuple.count", 1, args);
@@ -409,7 +413,7 @@ pub trait MappedSequence {
         name: &str,
         args: &[Value],
         listeners: &[Rc<dyn RenderingEventListener>],
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         match name {
             // MappedSequence methods
             "values" => {
@@ -431,7 +435,7 @@ pub trait MappedSequence {
                     Ok(Value::from_object(items))
                 } else {
                     // trying to approximate a `raise KeyError`
-                    Err(MinijinjaError::new(
+                    Err(minijinja::Error::new(
                         ErrorKind::NonKey,
                         format!("{} type does not define keys()", self.type_name()),
                     ))
@@ -452,7 +456,7 @@ pub trait MappedSequence {
                     Ok(Value::from_object(dict))
                 } else {
                     // trying to approximate a `raise KeyError`
-                    Err(MinijinjaError::new(
+                    Err(minijinja::Error::new(
                         ErrorKind::NonKey,
                         format!("{} type does not define keys()", self.type_name()),
                     ))
@@ -462,7 +466,7 @@ pub trait MappedSequence {
                 if let Some(value) = self.get_value(&Value::from(name)) {
                     return value.call(state, args, listeners);
                 }
-                Err(MinijinjaError::new(
+                Err(minijinja::Error::new(
                     ErrorKind::UnknownMethod,
                     format!("{} has no method named {}", self.type_name(), name),
                 ))

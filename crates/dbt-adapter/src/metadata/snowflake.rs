@@ -129,7 +129,7 @@ pub fn list_relations(
     for batch in batches {
         relations.extend(build_relations_from_show_objects(
             &batch,
-            adapter.quoting(),
+            ResolvedQuoting::trues(),
         )?);
     }
     Ok(relations)
@@ -867,7 +867,7 @@ fn build_schemas_from_information_schema(
             current_table = fully_qualified_name;
             current_fields = Vec::new();
 
-            let relation = match crate::relation::create_relation(
+            let relation = match crate::relation::do_create_relation(
                 type_ops.adapter_type(),
                 catalog.to_string(),
                 schema.to_string(),

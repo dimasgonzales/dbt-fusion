@@ -1,5 +1,4 @@
 use crate::adapter_engine::AdapterEngine;
-use crate::cache::RelationCache;
 use crate::column::ColumnStatic;
 use crate::metadata::*;
 use crate::query_cache::QueryCache;
@@ -21,7 +20,7 @@ use dbt_schemas::schemas::relations::base::{BaseRelation, ComponentName};
 use dbt_xdbc::{Backend, Connection};
 use indexmap::IndexMap;
 use minijinja::dispatch_object::DispatchObject;
-use minijinja::{Error as MinijinjaError, ErrorKind as MinijinjaErrorKind, State, Value};
+use minijinja::{State, Value};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -38,6 +37,8 @@ pub fn backend_of(adapter_type: AdapterType) -> Backend {
         AdapterType::Databricks => Backend::Databricks,
         AdapterType::Redshift => Backend::Redshift,
         AdapterType::Salesforce => Backend::Salesforce,
+        AdapterType::Spark => Backend::Spark,
+        AdapterType::Sidecar => Backend::DuckDB,
     }
 }
 
@@ -112,7 +113,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     /// ```python
     /// def commit(self) -> None
     /// ```
-    fn commit(&self) -> Result<Value, MinijinjaError> {
+    fn commit(&self) -> Result<Value, minijinja::Error> {
         Ok(Value::from(true))
     }
 
@@ -121,7 +122,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: Option<&State>,
         node_id: Option<String>,
-    ) -> Result<Box<dyn Connection>, MinijinjaError>;
+    ) -> Result<Box<dyn Connection>, minijinja::Error>;
 
     /// Cache added
     ///
@@ -137,7 +138,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("cache_added")
     }
 
@@ -155,7 +156,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("cache_dropped")
     }
 
@@ -175,7 +176,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _from_relation: Arc<dyn BaseRelation>,
         _to_relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("cache_renamed")
     }
 
@@ -193,7 +194,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _grants_table: &Arc<AgateTable>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Encloses identifier in the correct quotes for the adapter when escaping reserved column names etc.
     ///
@@ -206,7 +207,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     ///     identifier: str
     /// ) -> str
     /// ```
-    fn quote(&self, state: &State, identifier: &str) -> Result<Value, MinijinjaError>;
+    fn quote(&self, state: &State, identifier: &str) -> Result<Value, minijinja::Error>;
 
     /// Quote as configured.
     ///
@@ -224,7 +225,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         identifier: &str,
         quote_key: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Quote seed column.
     ///
@@ -242,7 +243,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         column: &str,
         quote_config: Option<bool>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Convert type.
     ///
@@ -260,7 +261,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         _table: &Arc<AgateTable>,
         _col_idx: i64,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Render raw model constraints.
     ///
@@ -277,11 +278,11 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         _raw_constraints: &[ModelConstraint],
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Verify database.
     /// ```
-    fn verify_database(&self, state: &State, _database: String) -> Result<Value, MinijinjaError>;
+    fn verify_database(&self, state: &State, _database: String) -> Result<Value, minijinja::Error>;
 
     /// Dispatch.
     ///
@@ -299,11 +300,11 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         macro_name: &str,
         macro_namespace: Option<&str>,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         if macro_name.contains('.') {
             let parts: Vec<&str> = macro_name.split('.').collect();
-            return Err(MinijinjaError::new(
-                MinijinjaErrorKind::InvalidOperation,
+            return Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
                 format!(
                     "In adapter.dispatch, got a macro name of \"{}\", but \".\" is not a valid macro name component. Did you mean `adapter.dispatch(\"{}\", macro_namespace=\"{}\")`?",
                     macro_name, parts[1], parts[0]
@@ -340,7 +341,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         strategy: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Execute the given SQL. This is a thin wrapper around [SqlEngine.execute].
     ///
@@ -454,7 +455,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Truncate relation.
     ///
@@ -470,7 +471,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Rename relation.
     ///
@@ -488,7 +489,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         from_relation: Arc<dyn BaseRelation>,
         to_relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Expand target column types.
     ///
@@ -506,7 +507,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         from_relation: Arc<dyn BaseRelation>,
         to_relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// List schemas.
     ///
@@ -518,14 +519,14 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     ///     database: str
     /// ) -> List[str]
     /// ```
-    fn list_schemas(&self, state: &State, database: &str) -> Result<Value, MinijinjaError>;
+    fn list_schemas(&self, state: &State, database: &str) -> Result<Value, minijinja::Error>;
 
     /// List relations without caching.
     fn list_relations_without_caching(
         &self,
         state: &State,
         schema_relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Create schema.
     ///
@@ -541,7 +542,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Drop schema.
     ///
@@ -557,7 +558,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Valid snapshot target.
     ///
@@ -573,7 +574,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Assert valid snapshot target given strategy.
     ///
@@ -592,7 +593,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _relation: Arc<dyn BaseRelation>,
         _column_names: Option<&BTreeMap<String, String>>,
         _strategy: &Arc<SnapshotStrategy>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get hard deletes behavior.
     ///
@@ -608,7 +609,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         config: BTreeMap<String, Value>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get relation.
     ///
@@ -629,7 +630,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         database: &str,
         schema: &str,
         identifier: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get a catalog relation object.
     ///
@@ -645,7 +646,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     /// In Core, there are numerous derived flavors of CatalogRelation.
     /// We handle this in Fusion as a piecemeal instantiated flat object
     /// and push down validation to the DDL level.
-    fn build_catalog_relation(&self, model: &Value) -> Result<Value, MinijinjaError>;
+    fn build_catalog_relation(&self, model: &Value) -> Result<Value, minijinja::Error>;
 
     /// Get all relevant metadata about a dynamic table to return as a dict to Agate Table row
     ///
@@ -658,7 +659,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get a catalog integration object.
     ///
@@ -674,7 +675,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _args: &[Value],
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!(
             "get_catalog_integration is unavailable in Fusion. Access catalogs metadata directly from a catalog relation obtained using adapter.build_catalog_relation(model: RelationConfig)"
         )
@@ -695,7 +696,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         _from_relation: Arc<dyn BaseRelation>,
         _to_relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get columns in relation.
     ///
@@ -711,7 +712,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Render raw columns constraints.
     ///
@@ -720,7 +721,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         raw_columns: &Value,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Check if schema exists
     ///
@@ -738,7 +739,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         database: &str,
         schema: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get relations by pattern
     ///
@@ -765,17 +766,21 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         database: Option<&str>,
         quote_table: Option<bool>,
         excluded_schemas: Option<Value>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get column schema from query
     fn get_column_schema_from_query(
         &self,
         state: &State,
         sql: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get columns in select sql
-    fn get_columns_in_select_sql(&self, state: &State, sql: &str) -> Result<Value, MinijinjaError>;
+    fn get_columns_in_select_sql(
+        &self,
+        state: &State,
+        sql: &str,
+    ) -> Result<Value, minijinja::Error>;
 
     /// Add time ingestion partition column
     ///
@@ -794,7 +799,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _columns: &Value,
         _partition_config: dbt_schemas::schemas::manifest::BigqueryPartitionConfig,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -813,7 +818,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _raw_partition_by: &Value,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -835,7 +840,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _relation: Option<Arc<dyn BaseRelation>>,
         _partition_by: Option<dbt_schemas::schemas::manifest::BigqueryPartitionConfig>,
         _cluster_by: Option<dbt_schemas::schemas::manifest::BigqueryClusterConfig>,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -847,7 +852,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _columns: &Value,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -858,7 +863,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         tmp_relation_partitioned: Arc<dyn BaseRelation>,
         target_relation_partitioned: Arc<dyn BaseRelation>,
         materialization: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// update_columns
     fn update_columns(
@@ -866,7 +871,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         relation: Arc<dyn BaseRelation>,
         columns: IndexMap<String, DbtColumn>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// update_table_description
     fn update_table_description(
@@ -876,7 +881,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         schema: &str,
         identifier: &str,
         description: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// alter_table_add_columns
     fn alter_table_add_columns(
@@ -884,7 +889,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         state: &State,
         relation: Arc<dyn BaseRelation>,
         columns: &Value,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// load_dataframe
     #[allow(clippy::too_many_arguments)]
@@ -897,10 +902,10 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _agate_table: Arc<AgateTable>,
         _file_path: &str,
         _field_delimiter: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// upload_file
-    fn upload_file(&self, _state: &State, _args: &[Value]) -> Result<Value, MinijinjaError> {
+    fn upload_file(&self, _state: &State, _args: &[Value]) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -911,7 +916,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
         _temporary: bool,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -930,7 +935,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
         _temporary: bool,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -940,7 +945,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with BigQuery adapter")
     }
 
@@ -949,14 +954,14 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// describe_relation
     fn describe_relation(
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// grant_access_to
     fn grant_access_to(
@@ -967,14 +972,14 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         role: Option<&str>,
         database: &str,
         schema: &str,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// get_dataset_location
     fn get_dataset_location(
         &self,
         state: &State,
         relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Compare Databricks Runtime version.
     ///
@@ -989,7 +994,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _major: i64,
         _minor: i64,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Compute external path for Databricks external tables.
     ///
@@ -1000,7 +1005,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
         _is_incremental: bool,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Add UniForm Iceberg table properties.
     ///
@@ -1017,7 +1022,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
         _tblproperties: Option<Value>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Is table UniForm Iceberg
     ///
@@ -1031,7 +1036,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _config: dbt_schemas::schemas::project::ModelConfig,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Generate a unique temporary table suffix.
     ///
@@ -1040,7 +1045,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _suffix_initial: Option<String>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Parse columns and constraints for table creation.
     ///
@@ -1051,19 +1056,19 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _existing_columns: &Value,
         _model_columns: &Value,
         _model_constraints: &Value,
-    ) -> Result<Value, MinijinjaError> {
+    ) -> Result<Value, minijinja::Error> {
         unimplemented!("only available with Databricks adapter")
     }
 
     /// Get the list of valid incremental strategies for this adapter.
-    fn valid_incremental_strategies(&self, _state: &State) -> Result<Value, MinijinjaError>;
+    fn valid_incremental_strategies(&self, _state: &State) -> Result<Value, minijinja::Error>;
 
     /// get_partitions_metadata
     fn get_partitions_metadata(
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get columns to persist documentation for.
     ///
@@ -1074,18 +1079,18 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         _state: &State,
         _existing_columns: &Value,
         _model_columns: &Value,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     fn get_column_tags_from_model(
         &self,
         _state: &State,
         _node: &dyn InternalDbtNodeAttributes,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Clean SQL by removing extra whitespace and normalizing format.
     ///
     /// Only available with Databricks adapter.
-    fn clean_sql(&self, _sql: &str) -> Result<Value, MinijinjaError>;
+    fn clean_sql(&self, _sql: &str) -> Result<Value, minijinja::Error>;
 
     /// Get the configuration of an existing relation from the remote data warehouse.
     ///
@@ -1094,7 +1099,7 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// Get configuration from a model node.
     ///
@@ -1104,20 +1109,20 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
         &self,
         _state: &State,
         _node: &dbt_schemas::schemas::InternalDbtNodeWrapper,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// get_relations_without_caching
     fn get_relations_without_caching(
         &self,
         _state: &State,
         _relation: Arc<dyn BaseRelation>,
-    ) -> Result<Value, MinijinjaError>;
+    ) -> Result<Value, minijinja::Error>;
 
     /// parse_index
-    fn parse_index(&self, _state: &State, _raw_index: &Value) -> Result<Value, MinijinjaError>;
+    fn parse_index(&self, _state: &State, _raw_index: &Value) -> Result<Value, minijinja::Error>;
 
     /// redact_credentials
-    fn redact_credentials(&self, _state: &State, _sql: &str) -> Result<Value, MinijinjaError>;
+    fn redact_credentials(&self, _state: &State, _sql: &str) -> Result<Value, minijinja::Error>;
 
     /// Behavior (flags)
     fn behavior(&self) -> Value;
@@ -1131,17 +1136,13 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     /// # Returns
     ///
     /// Returns true if the warehouse was overridden, false otherwise
-    fn use_warehouse(&self, _warehouse: Option<String>, _node_id: &str) -> FsResult<bool> {
-        Ok(false)
-    }
+    fn use_warehouse(&self, _warehouse: Option<String>, _node_id: &str) -> FsResult<bool>;
 
     /// Used internally to attempt executing a Snowflake `use warehouse [name]` statement from BridgeAdapter
     ///
     /// To restore to the warehouse configured in profiles.yml
     /// For other BaseAdapter types, this is noop
-    fn restore_warehouse(&self, _node_id: &str) -> FsResult<()> {
-        Ok(())
-    }
+    fn restore_warehouse(&self, _node_id: &str) -> FsResult<()>;
 
     /// Used internally to hydrate the relation cache with the given schema -> relation map
     ///
@@ -1149,19 +1150,13 @@ pub trait BaseAdapter: fmt::Debug + AdapterTyping + Send + Sync {
     fn update_relation_cache(
         &self,
         _schema_to_relations_map: BTreeMap<CatalogAndSchema, Vec<Arc<dyn BaseRelation>>>,
-    ) -> FsResult<()> {
-        Ok(())
-    }
+    ) -> FsResult<()>;
 
     /// Used internally to identify if a schema is already cached
-    fn is_already_fully_cached(&self, _schema: &CatalogAndSchema) -> bool {
-        false
-    }
+    fn is_already_fully_cached(&self, _schema: &CatalogAndSchema) -> bool;
 
     /// Used internally to identify if a relation is already cached
-    fn is_cached(&self, _relation: &Arc<dyn BaseRelation>) -> bool {
-        false
-    }
+    fn is_cached(&self, _relation: &Arc<dyn BaseRelation>) -> bool;
 }
 
 impl fmt::Display for dyn BaseAdapter {
@@ -1207,9 +1202,6 @@ pub trait AdapterFactory: Send + Sync {
         node: &dyn InternalDbtNodeAttributes,
         adapter_type: AdapterType,
     ) -> Result<Arc<dyn BaseRelation>, minijinja::Error>;
-
-    /// Return a new instance of the factory with a different relation cache.
-    fn with_relation_cache(&self, relation_cache: Arc<RelationCache>) -> Arc<dyn AdapterFactory>;
 }
 
 /// Check if the adapter type is supported
